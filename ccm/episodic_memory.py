@@ -191,78 +191,54 @@ class EpisodicMemory:
         query: str,
         top_k: int = DEFAULT_TOP_K,
         exclude_stale: bool = True
-    ) -> list:
+        ) -> list:
         """
-        Find the most relevant episodic memories for a query.
-        
-        This is the RAG retrieval step.
-        
-        HOW IT WORKS:
-          1. Embed the query into a vector
-          2. ChromaDB computes cosine similarity between
-             query vector and all stored vectors
-          3. Returns top_k most similar entries
-          4. We filter out stale entries
-          5. We filter by similarity threshold
-        
-        Parameters:
-          query:         The current user message or topic
-          top_k:         Maximum number of results to return
-          exclude_stale: If True, skip entries marked as stale
-        
-        Returns:
-          List of dicts with: id, text, similarity, metadata
-        
-        Example:
-          results = episodic.retrieve("dinner restaurants Tokyo")
-          # Returns summaries about Tokyo restaurants
-          # Does NOT return summaries about Kyoto hotels
-          # Even if both are stored
+        Retrieve relevant episodic memories.
+
+        KEY CHANGE: Filter stale entries in Python, not ChromaDB.
+        ChromaDB boolean filtering is unreliable across versions.
+        We fetch more results and filter manually.
         """
-        # Cannot search empty collection
         if self.collection.count() == 0:
             return []
 
-        # Cannot request more results than exist
-        actual_top_k = min(top_k, self.collection.count())
-
-        # Embed the query
+        # Fetch more than needed so we have room to filter stale
+        fetch_k = min(top_k * 3, self.collection.count())
         query_vector = embed(query)
 
-        # Build metadata filter
-        # If exclude_stale=True, only retrieve entries where stale=False
-        where_filter = None
-        if exclude_stale:
-            where_filter = {"stale": {"$eq": False}}
-
         try:
-            # Query ChromaDB
+            # Fetch WITHOUT any where filter
+            # We will filter stale manually in Python
             results = self.collection.query(
                 query_embeddings=[query_vector],
-                n_results=actual_top_k,
-                where=where_filter,
+                n_results=fetch_k,
                 include=["documents", "metadatas", "distances"]
             )
         except Exception as e:
             print(f"[EpisodicMemory] Query error: {e}")
             return []
 
-        # ChromaDB returns distances not similarities
-        # Distance 0.0 = identical, Distance 2.0 = opposite
-        # Convert to similarity: similarity = 1 - (distance / 2)
-        retrieved = []
         documents = results.get("documents", [[]])[0]
         metadatas = results.get("metadatas", [[]])[0]
         distances = results.get("distances", [[]])[0]
         ids = results.get("ids", [[]])[0]
 
+        retrieved = []
         for doc, meta, dist, rid in zip(
             documents, metadatas, distances, ids
         ):
-            # Convert distance to similarity score (0 to 1)
+            # MANUAL stale filter in Python — reliable
+            if exclude_stale:
+                is_stale = meta.get("stale", False)
+                # Handle string "true"/"false" from ChromaDB
+                if isinstance(is_stale, str):
+                    is_stale = is_stale.lower() == "true"
+                if is_stale:
+                    print(f"[EpisodicMemory] Skipping stale: {doc[:40]}")
+                    continue
+
             similarity = 1.0 - (dist / 2.0)
 
-            # Skip if below threshold
             if similarity < SIMILARITY_THRESHOLD:
                 continue
 
@@ -273,21 +249,18 @@ class EpisodicMemory:
                 "metadata": meta
             })
 
+            # Stop once we have enough
+            if len(retrieved) >= top_k:
+                break
+
         if retrieved:
             print(
-                f"[EpisodicMemory] Retrieved {len(retrieved)} "
-                f"relevant memories for query: '{query[:50]}'"
+                f"[EpisodicMemory] Retrieved {len(retrieved)} memories"
             )
             for r in retrieved:
-                print(
-                    f"  [{r['similarity']:.2f}] "
-                    f"{r['text'][:70]}..."
-                )
+                print(f"  [{r['similarity']:.2f}] {r['text'][:60]}")
         else:
-            print(
-                f"[EpisodicMemory] No relevant memories "
-                f"found for: '{query[:50]}'"
-            )
+            print("[EpisodicMemory] No relevant memories found")
 
         return retrieved
 
