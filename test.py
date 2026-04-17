@@ -9,91 +9,85 @@ os.environ["CHROMA_TELEMETRY"] = "False"
 
 sys.path.append('.')
 
-# Global clients to track and close
-_chroma_clients = []
+DEFAULT_MEMORY = {
+    "facts": {"critical": [], "important": [], "contextual": []},
+    "decisions": [],
+    "cancelled": [],
+    "turn_count": 0,
+    "conversation_id": "",
+    "last_updated": ""
+}
 
-def register_chroma_client(client):
-    """Track ChromaDB clients so we can close them."""
-    _chroma_clients.append(client)
+CHROMA_PATH = "./data/chroma_db"
+
 
 def reset_all_storage():
     """
-    Close all ChromaDB connections first, then delete files.
-    Windows requires files to be released before deletion.
+    Reliably wipe all persisted state between tests.
+    Strategy: delete collections first (releases file locks),
+    then delete the folder, then recreate it.
     """
     import shutil
-    import chromadb
 
-    # Step 1: Close all tracked ChromaDB clients
-    global _chroma_clients
-    for client in _chroma_clients:
-        try:
-            # Reset client to release file handles
-            client.reset()
-        except Exception:
-            pass
-    _chroma_clients.clear()
-
-    # Step 2: Force garbage collection
-    # This releases any lingering Python references
-    gc.collect()
-    time.sleep(1)  # Give Windows time to release locks
-
-    # Step 3: Reset working memory
+    # ── 1. Reset working memory JSON ────────────────────────────
     os.makedirs("data", exist_ok=True)
     with open("data/working_memory.json", "w") as f:
-        json.dump({
-            "facts": {
-                "critical": [],
-                "important": [],
-                "contextual": []
-            },
-            "decisions": [],
-            "cancelled": [],
-            "turn_count": 0,
-            "conversation_id": "",
-            "last_updated": ""
-        }, f)
+        json.dump(DEFAULT_MEMORY, f, indent=2)
 
-    # Step 4: Try to delete ChromaDB folder
-    chroma_path = "./data/chroma_db"
-    if os.path.exists(chroma_path):
+    # ── 2. Force-close open ChromaDB connections ─────────────────
+    #    We can't track clients created inside CCM/EpisodicMemory,
+    #    so we use gc to release them and then clear via a fresh client.
+    gc.collect()
+    time.sleep(0.3)
+
+    # ── 3. Clear collections via a fresh client ──────────────────
+    if os.path.exists(CHROMA_PATH):
         try:
-            shutil.rmtree(chroma_path)
+            import chromadb
+            client = chromadb.PersistentClient(path=CHROMA_PATH)
+            for col in client.list_collections():
+                try:
+                    name = col.name if hasattr(col, "name") else str(col)
+                    client.delete_collection(name)
+                    print(f"[Reset] Deleted collection: {name}")
+                except Exception as e:
+                    print(f"[Reset] Could not delete collection: {e}")
+            del client
+            gc.collect()
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"[Reset] Collection clear error: {e}")
+
+    # ── 4. Delete and recreate the folder ───────────────────────
+    if os.path.exists(CHROMA_PATH):
+        try:
+            shutil.rmtree(CHROMA_PATH)
             print("[Reset] ChromaDB folder deleted")
         except PermissionError:
-            # If still locked, just clear collections instead
-            print("[Reset] Cannot delete folder (locked), clearing collections...")
-            try:
-                client = chromadb.PersistentClient(path=chroma_path)
-                # Delete each collection individually
-                for collection in client.list_collections():
-                    try:
-                        client.delete_collection(collection.name)
-                        print(f"[Reset] Deleted collection: {collection.name}")
-                    except Exception as e:
-                        print(f"[Reset] Could not delete {collection.name}: {e}")
-                del client
-                gc.collect()
-            except Exception as e:
-                print(f"[Reset] Collection clear failed: {e}")
+            print("[Reset] Folder locked — collections were cleared above")
+        except Exception as e:
+            print(f"[Reset] Folder delete error: {e}")
 
-    os.makedirs(chroma_path, exist_ok=True)
-    time.sleep(0.5)
-    print("[Reset] All storage cleared")
+    os.makedirs(CHROMA_PATH, exist_ok=True)
+    time.sleep(0.3)
+    print("[Reset] Storage reset complete\n")
+
+
+# ─────────────────────────────────────────────────────────────────
+# TEST 1 — Memory Extraction Priority
+# ─────────────────────────────────────────────────────────────────
 
 def test_1_memory_extraction():
-    """Test fact extraction with correct priority."""
-    print("\n" + "="*55)
+    print("\n" + "=" * 55)
     print("TEST 1: Memory Extraction Priority")
-    print("="*55)
+    print("=" * 55)
 
     reset_all_storage()
 
     from ccm.memory_store import WorkingMemory
     from ccm.extractor import MemoryExtractor
 
-    memory = WorkingMemory()
+    memory    = WorkingMemory()
     extractor = MemoryExtractor()
 
     msg = (
@@ -107,14 +101,14 @@ def test_1_memory_extraction():
 
     print(f"\nExtracted {len(facts)} facts:")
     for f in facts:
-        print(f"  [{f['priority']:11}] {f['key']}: {f['value']}")
+        print(f"  [{f['priority']:11}] {f['key']:30} → {f['value']}")
 
     print("\nFormatted memory:")
     print(memory.format_for_prompt())
 
-    critical = memory.get_critical_facts()
-    critical_values = [f['value'].lower() for f in critical]
-    allergy_critical = any('shellfish' in v for v in critical_values)
+    critical        = memory.get_critical_facts()
+    critical_values = [f["value"].lower() for f in critical]
+    allergy_critical = any("shellfish" in v for v in critical_values)
 
     print(f"\nShellfish allergy is CRITICAL: {allergy_critical}")
     result = allergy_critical
@@ -122,28 +116,31 @@ def test_1_memory_extraction():
     return result
 
 
+# ─────────────────────────────────────────────────────────────────
+# TEST 2 — Stale Context Detection
+# ─────────────────────────────────────────────────────────────────
+
 def test_2_stale_detection():
-    """Test that cancelled context is hidden from retrieval."""
-    print("\n" + "="*55)
+    print("\n" + "=" * 55)
     print("TEST 2: Stale Context Detection")
-    print("="*55)
+    print("=" * 55)
 
     reset_all_storage()
 
-    from ccm.memory_store import WorkingMemory
+    from ccm.memory_store  import WorkingMemory
     from ccm.stale_detector import StaleDetector
     from ccm.episodic_memory import EpisodicMemory
     from ccm.semantic_memory import SemanticMemory
 
-    memory = WorkingMemory()
+    memory   = WorkingMemory()
     episodic = EpisodicMemory()
     semantic = SemanticMemory()
     detector = StaleDetector()
 
-    # Add Bali to memory
+    # Add Bali to working memory
     memory.add_facts([{
-        "key": "destination_primary",
-        "value": "Bali beach vacation",
+        "key":      "destination_primary",
+        "value":    "Bali beach vacation",
         "category": "decision",
         "priority": "important"
     }])
@@ -157,64 +154,62 @@ def test_2_stale_detection():
 
     # Verify it is retrievable BEFORE stale marking
     before_results = episodic.retrieve("Bali resorts")
-    print(f"Before pivot - Bali in episodic: {len(before_results)}")
+    print(f"Before pivot — Bali in episodic: {len(before_results)}")
     assert len(before_results) > 0, "Should find Bali before pivot"
 
     # User cancels Bali
     pivot_msg = "Scratch Bali, let us do Switzerland instead."
-    result = detector.check_and_clean(
-        pivot_msg, memory, episodic, semantic
-    )
-
+    result = detector.check_and_clean(pivot_msg, memory, episodic, semantic)
     print(f"Override detected: {result['has_override']}")
-    time.sleep(1)  # Wait for ChromaDB to update
+
+    time.sleep(0.5)
 
     # Verify Bali is GONE after stale marking
     after_results = episodic.retrieve("Bali resorts")
-    print(f"After pivot - Bali in episodic: {len(after_results)}")
+    print(f"After pivot — Bali in episodic: {len(after_results)}")
 
-    # Check memory has cancelled Bali
     cancelled = memory.get_all().get("cancelled", [])
     print(f"Cancelled in memory: {cancelled}")
 
-    passed = (
-        result['has_override'] and
-        len(after_results) == 0
-    )
+    passed = result["has_override"] and len(after_results) == 0
     print(f"{'✅ TEST 2 PASSED' if passed else '❌ TEST 2 FAILED'}")
     return passed
 
 
+# ─────────────────────────────────────────────────────────────────
+# TEST 3 — Tool Result Compression
+# ─────────────────────────────────────────────────────────────────
+
 def test_3_compression():
-    """Test tool result compression ratio and constraint flagging."""
-    print("\n" + "="*55)
+    print("\n" + "=" * 55)
     print("TEST 3: Tool Result Compression")
-    print("="*55)
+    print("=" * 55)
 
     reset_all_storage()
 
-    from ccm.compressor import ToolCompressor
+    from ccm.compressor    import ToolCompressor
     from travel_agent.tools import places_search
 
     compressor = ToolCompressor()
 
-    raw = places_search("Tsukiji Tokyo", "restaurants")
-    raw_str = str(raw)
+    raw       = places_search("Tsukiji Tokyo", "restaurants")
+    raw_str   = json.dumps(raw)
     raw_tokens = len(raw_str) // 4
 
     constraints = ["severely allergic to shellfish"]
-    compressed = compressor.compress(raw, "places_search", constraints)
-    compressed_tokens = len(compressed) // 4
-    ratio = raw_tokens / max(compressed_tokens, 1)
+    compressed  = compressor.compress(raw, "places_search", constraints)
+    comp_tokens = len(compressed) // 4
+    ratio       = raw_tokens / max(comp_tokens, 1)
 
     print(f"Raw tokens:        {raw_tokens}")
-    print(f"Compressed tokens: {compressed_tokens}")
+    print(f"Compressed tokens: {comp_tokens}")
     print(f"Ratio:             {ratio:.1f}x")
     print(f"\nCompressed:\n{compressed}")
 
-    shellfish_flagged = any(w in compressed.lower() for w in [
-        'shellfish', '⚠️', 'allergy', 'avoid', 'warning'
-    ])
+    shellfish_flagged = any(
+        w in compressed.lower()
+        for w in ["shellfish", "⚠️", "allergy", "avoid", "warning"]
+    )
     print(f"\nShellfish flagged: {shellfish_flagged}")
 
     passed = ratio > 2.0 and shellfish_flagged
@@ -222,19 +217,22 @@ def test_3_compression():
     return passed
 
 
+# ─────────────────────────────────────────────────────────────────
+# TEST 4 — RAG Retrieval
+# ─────────────────────────────────────────────────────────────────
+
 def test_4_rag_retrieval():
-    """Test RAG finds relevant memories and ignores irrelevant ones."""
-    print("\n" + "="*55)
+    print("\n" + "=" * 55)
     print("TEST 4: RAG Retrieval")
-    print("="*55)
+    print("=" * 55)
 
     reset_all_storage()
 
     from ccm.episodic_memory import EpisodicMemory
     from ccm.semantic_memory import SemanticMemory
-    from ccm.retriever import Retriever
+    from ccm.retriever       import Retriever
 
-    ep = EpisodicMemory()
+    ep  = EpisodicMemory()
     sem = SemanticMemory()
 
     ep.add(
@@ -262,16 +260,15 @@ def test_4_rag_retrieval():
         n_semantic=2
     )
 
-    total = len(results['episodic']) + len(results['semantic'])
+    total = len(results["episodic"]) + len(results["semantic"])
     print(f"Total retrieved: {total}")
 
-    # The allergy memory should be retrieved
     all_texts = (
-        [r['text'] for r in results['episodic']] +
-        [r['text'] for r in results['semantic']]
+        [r["text"] for r in results["episodic"]] +
+        [r["text"] for r in results["semantic"]]
     )
     allergy_retrieved = any(
-        'shellfish' in t.lower() or 'allergy' in t.lower()
+        "shellfish" in t.lower() or "allergy" in t.lower()
         for t in all_texts
     )
     print(f"Allergy info retrieved: {allergy_retrieved}")
@@ -281,13 +278,14 @@ def test_4_rag_retrieval():
     return passed
 
 
+# ─────────────────────────────────────────────────────────────────
+# TEST 5 — CCM Agent Remembers Allergy
+# ─────────────────────────────────────────────────────────────────
+
 def test_5_ccm_agent_allergy():
-    """
-    KEY TEST: Allergy stated at turn 1, must be flagged at turn 4.
-    """
-    print("\n" + "="*55)
+    print("\n" + "=" * 55)
     print("TEST 5: CCM Agent Remembers Allergy")
-    print("="*55)
+    print("=" * 55)
 
     reset_all_storage()
 
@@ -304,38 +302,39 @@ def test_5_ccm_agent_allergy():
         ),
         "Find flights from New York to Tokyo in June",
         "Find hotels in Tokyo",
-        # KEY: Must flag shellfish allergy in response
-        "Find dinner restaurants near Tsukiji fish market in Tokyo"
+        "Find dinner restaurants near Tsukiji fish market in Tokyo",
     ]
 
     responses = []
     for i, msg in enumerate(turns):
-        print(f"\nTurn {i+1}: {msg[:70]}...")
+        print(f"\nTurn {i + 1}: {msg[:70]}...")
         result = agent.chat(msg)
-        responses.append(result['response'])
+        responses.append(result["response"])
         print(f"Tokens: {result['tokens_in_context']}")
         if i == len(turns) - 1:
             print(f"\nFINAL RESPONSE:\n{result['response']}")
 
-    # Check final response mentions allergy
     final = responses[-1].lower()
     allergy_words = [
-        'shellfish', 'allergy', 'allergic',
-        'seafood', '⚠️', 'warning', 'avoid',
-        'cannot eat', 'medical'
+        "shellfish", "allergy", "allergic",
+        "seafood", "⚠️", "warning", "avoid",
+        "cannot eat", "medical"
     ]
     allergy_remembered = any(w in final for w in allergy_words)
 
-    print(f"\nAllergy mentioned: {allergy_remembered}")
+    print(f"\nAllergy mentioned in final response: {allergy_remembered}")
     print(f"{'✅ TEST 5 PASSED' if allergy_remembered else '❌ TEST 5 FAILED'}")
     return allergy_remembered
 
 
+# ─────────────────────────────────────────────────────────────────
+# TEST 6 — Baseline Fails (proves the problem)
+# ─────────────────────────────────────────────────────────────────
+
 def test_6_baseline_fails():
-    """Baseline overflows — proves the problem."""
-    print("\n" + "="*55)
+    print("\n" + "=" * 55)
     print("TEST 6: Baseline Fails (proves problem)")
-    print("="*55)
+    print("=" * 55)
 
     reset_all_storage()
 
@@ -349,54 +348,59 @@ def test_6_baseline_fails():
         "Find flights from New York to Tokyo",
         "Search for hotels in Tokyo",
         "What is the weather in Tokyo?",
-        "Find restaurants near Tsukiji market"
+        "Find restaurants near Tsukiji market",
     ]
 
     tokens_per_turn = []
-    responses = []
+    responses       = []
+
     for i, msg in enumerate(turns):
-        print(f"\nTurn {i+1}: {msg[:60]}...")
+        print(f"\nTurn {i + 1}: {msg[:60]}...")
         result = agent.chat(msg)
-        tokens_per_turn.append(result['tokens_in_context'])
-        responses.append(result['response'])
+        tokens_per_turn.append(result["tokens_in_context"])
+        responses.append(result["response"])
         print(f"Tokens: {result['tokens_in_context']}")
-        if 'ERROR' in result['response'] or 'error' in result['response'].lower():
-            print(f"⚠️  Error/overflow detected")
+        if "ERROR" in result["response"] or "error" in result["response"].lower():
+            print("⚠️  Error/overflow detected")
 
     print(f"\nToken growth: {tokens_per_turn}")
 
-    # Check final response for allergy
     final = responses[-1].lower() if responses else ""
     allergy_remembered = any(
-        w in final for w in ['shellfish', 'allergy', 'allergic']
+        w in final for w in ["shellfish", "allergy", "allergic"]
     )
 
     overflow_occurred = any(t > 6000 for t in tokens_per_turn)
     print(f"Context overflow occurred: {overflow_occurred}")
     print(f"Baseline remembered allergy: {allergy_remembered}")
 
-    # Pass if baseline fails (either overflow or forgot allergy)
     passed = overflow_occurred or not allergy_remembered
-    print(f"{'✅ TEST 6 PASSED (baseline correctly failed)' if passed else '❌ TEST 6 FAILED'}")
+    print(
+        f"{'✅ TEST 6 PASSED (baseline correctly failed)' if passed else '❌ TEST 6 FAILED'}"
+    )
     return passed
 
 
+# ─────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    print("\n" + "="*55)
+    print("\n" + "=" * 55)
     print("FULL SYSTEM TEST")
-    print("="*55)
+    print("=" * 55)
 
     results = {}
-    results['memory_extraction'] = test_1_memory_extraction()
-    results['stale_detection'] = test_2_stale_detection()
-    results['compression'] = test_3_compression()
-    results['rag_retrieval'] = test_4_rag_retrieval()
-    results['ccm_allergy'] = test_5_ccm_agent_allergy()
-    results['baseline_fails'] = test_6_baseline_fails()
+    results["memory_extraction"] = test_1_memory_extraction()
+    results["stale_detection"]   = test_2_stale_detection()
+    results["compression"]       = test_3_compression()
+    results["rag_retrieval"]     = test_4_rag_retrieval()
+    results["ccm_allergy"]       = test_5_ccm_agent_allergy()
+    results["baseline_fails"]    = test_6_baseline_fails()
 
-    print("\n" + "="*55)
+    print("\n" + "=" * 55)
     print("FINAL RESULTS")
-    print("="*55)
+    print("=" * 55)
     for name, passed in results.items():
         print(f"  {'✅ PASS' if passed else '❌ FAIL'}  {name}")
 

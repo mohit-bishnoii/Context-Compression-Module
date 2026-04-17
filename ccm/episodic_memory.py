@@ -155,10 +155,10 @@ class EpisodicMemory:
         # We can filter by metadata during retrieval
         entry_metadata = {
             "turn_start": turn_range[0],
-            "turn_end": turn_range[1],
+            "turn_end":   turn_range[1],
             "created_at": datetime.now().isoformat(),
-            "stale": False,   # True = do not retrieve this
-            "type": "episodic_summary"
+            "stale":      "false",   
+            "type":       "episodic_summary"
         }
 
         # Merge any extra metadata passed in
@@ -328,8 +328,8 @@ class EpisodicMemory:
                     continue
 
                 updated_meta = dict(meta)
-                updated_meta["stale"] = True
-                updated_meta["staled_at"] = datetime.now().isoformat()
+                updated_meta["stale"]       = "true"          # ← STRING
+                updated_meta["staled_at"]   = datetime.now().isoformat()
                 updated_meta["stale_reason"] = f"Cancelled: {substring}"
 
                 self.collection.update(
@@ -351,51 +351,46 @@ class EpisodicMemory:
         return stale_count
 
     def get_all_active(self) -> list:
-        """
-        Get all non-stale entries. Used for debugging and UI display.
-        """
+        """Get all non-stale entries. Filters in Python (ChromaDB bool is unreliable)."""
         if self.collection.count() == 0:
             return []
-
         try:
-            results = self.collection.get(
-                where={"stale": {"$eq": False}},
-                include=["documents", "metadatas"]
-            )
-            entries = []
-            for doc, meta, entry_id in zip(
-                results["documents"],
-                results["metadatas"],
-                results["ids"]
-            ):
-                entries.append({
-                    "id": entry_id,
-                    "text": doc,
-                    "metadata": meta
-                })
-            return entries
+            results = self.collection.get(include=["documents", "metadatas"])
         except Exception as e:
-            print(f"[EpisodicMemory] Error getting all: {e}")
+            print(f"[EpisodicMemory] get_all_active error: {e}")
             return []
 
+        entries = []
+        for doc, meta, eid in zip(
+            results.get("documents", []),
+            results.get("metadatas",  []),
+            results.get("ids",        [])
+        ):
+            raw = meta.get("stale", "false")
+            is_stale = raw if isinstance(raw, bool) else str(raw).lower() == "true"
+            if not is_stale:
+                entries.append({"id": eid, "text": doc, "metadata": meta})
+        return entries
+
     def get_count(self) -> dict:
-        """Return count of total and stale entries."""
+        """Return count statistics. Filters in Python (ChromaDB bool is unreliable)."""
         total = self.collection.count()
         if total == 0:
             return {"total": 0, "active": 0, "stale": 0}
-
         try:
-            stale_results = self.collection.get(
-                where={"stale": {"$eq": True}}
-            )
-            stale_count = len(stale_results.get("ids", []))
-            return {
-                "total": total,
-                "active": total - stale_count,
-                "stale": stale_count
-            }
+            results  = self.collection.get(include=["metadatas"])
+            all_meta = results.get("metadatas", [])
         except Exception:
             return {"total": total, "active": total, "stale": 0}
+
+        stale_count = 0
+        for meta in all_meta:
+            raw = meta.get("stale", "false")
+            is_stale = raw if isinstance(raw, bool) else str(raw).lower() == "true"
+            if is_stale:
+                stale_count += 1
+
+        return {"total": total, "active": total - stale_count, "stale": stale_count}
 
     def reset(self):
         """

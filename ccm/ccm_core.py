@@ -160,7 +160,8 @@ class ContextCompressionModule:
         stale_result = self.stale_detector.check_and_clean(
             user_message,
             self.working_memory,
-            self.episodic_memory
+            self.episodic_memory,
+            self.semantic_memory         
         )
         if stale_result.get("has_override"):
             print(

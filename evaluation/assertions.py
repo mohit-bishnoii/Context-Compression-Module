@@ -539,3 +539,65 @@ ALL_TESTS = [
     TEST_D_CROSS_REFERENCE,
     TEST_E_CONTRADICTION
 ]
+
+# evaluation/assertions.py
+#
+# Pass/fail assertion functions for evaluation conversations.
+# Used by run_evaluation.py to check agent responses.
+
+
+def check_response(response: str, criteria: dict) -> dict:
+    """
+    Check an agent response against pass criteria.
+
+    Criteria keys supported:
+      must_contain_any      list of strings — at least one must appear
+      must_not_contain_any  list of strings — none may appear
+      must_not_contain      list of strings — none may appear (alias)
+      case_sensitive        bool — default False
+
+    Returns:
+      {passed: bool, score: float, details: str}
+    """
+    case_sensitive = criteria.get("case_sensitive", False)
+
+    if case_sensitive:
+        check_text = response
+        normalise = lambda w: w
+    else:
+        check_text = response.lower()
+        normalise = lambda w: w.lower()
+
+    details = []
+    passed = True
+
+    # ── must_contain_any ────────────────────────────────────────
+    must_contain_any = criteria.get("must_contain_any", [])
+    if must_contain_any:
+        hits = [w for w in must_contain_any if normalise(w) in check_text]
+        if hits:
+            details.append(f"PASS: found required word(s): {hits}")
+        else:
+            passed = False
+            details.append(
+                f"FAIL: none of {must_contain_any} found in response"
+            )
+
+    # ── must_not_contain_any ────────────────────────────────────
+    forbidden = criteria.get("must_not_contain_any", [])
+    # also support the singular key used in Test A
+    forbidden += criteria.get("must_not_contain", [])
+    if forbidden:
+        hits = [w for w in forbidden if normalise(w) in check_text]
+        if hits:
+            passed = False
+            details.append(f"FAIL: forbidden word(s) found: {hits}")
+        else:
+            details.append("PASS: no forbidden words found")
+
+    score = 1.0 if passed else 0.0
+    return {
+        "passed": passed,
+        "score": score,
+        "details": " | ".join(details) if details else "no criteria"
+    }
