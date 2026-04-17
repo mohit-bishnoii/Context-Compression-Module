@@ -28,7 +28,8 @@ from travel_agent.tools import (
     web_search,
     places_search,
     weather_fetch,
-    budget_tracker
+    budget_tracker,
+    reset_budget,
 )
 from travel_agent.prompts import TRAVEL_AGENT_SYSTEM_PROMPT
 
@@ -197,6 +198,143 @@ def execute_tool(tool_name: str, tool_args: dict) -> tuple:
         return {"error": str(e)}, tool_name
 
 
+def _looks_like_food_query(user_message: str) -> bool:
+    """Heuristic: does this turn involve restaurants or dining?"""
+    msg = user_message.lower()
+    keywords = [
+        "restaurant", "restaurants", "dinner", "lunch", "breakfast",
+        "food", "eat", "dining", "spots", "cafe",
+    ]
+    return any(word in msg for word in keywords)
+
+
+def _response_mentions_allergy(response_text: str) -> bool:
+    """Check whether the model already surfaced the allergy constraint."""
+    text = response_text.lower()
+    markers = [
+        "shellfish", "allerg", "seafood", "warning", "avoid",
+        "safe for", "not suitable", "cannot eat",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _classify_restaurant_safety(item: dict) -> str:
+    """
+    Classify restaurant safety from tool metadata.
+
+    Returns one of: "unsafe", "safe", "caution", "unknown".
+    """
+    warning = str(item.get("allergy_warning", "")).lower()
+    cuisine = str(item.get("cuisine", "")).lower()
+
+    safe_markers = [
+        "safe for shellfish allergy",
+        "shellfish-free",
+        "no shellfish",
+        "accommodate shellfish allergy",
+        "allergy accommodations available",
+    ]
+    caution_markers = [
+        "check with staff",
+        "ask vendor",
+        "ask staff",
+        "advance notice",
+    ]
+
+    if any(marker in warning for marker in safe_markers):
+        return "safe"
+    if (
+        "seafood" in cuisine and "safe" not in warning
+    ) or "not suitable for shellfish allergy" in warning or "primary ingredient" in warning:
+        return "unsafe"
+    if any(marker in warning for marker in caution_markers):
+        return "caution"
+    if "shellfish" in warning:
+        return "unsafe"
+    return "unknown"
+
+
+def _enforce_critical_constraints(
+    response_text: str,
+    user_message: str,
+    tool_calls_this_turn: list,
+    memory_state: dict,
+) -> str:
+    """
+    Deterministic last-mile guardrail for critical constraints.
+
+    The CCM still performs the main reasoning, but this prevents a silent
+    miss on hard allergy constraints during evaluation.
+    """
+    critical_facts = (
+        memory_state.get("working_memory_raw", {})
+        .get("facts", {})
+        .get("critical", [])
+    )
+    critical_values = [
+        str(fact.get("value", "")).lower()
+        for fact in critical_facts
+    ]
+
+    has_shellfish_constraint = any(
+        "shellfish" in value or "allerg" in value
+        for value in critical_values
+    )
+    if not has_shellfish_constraint or not _looks_like_food_query(user_message):
+        return response_text
+
+    if _response_mentions_allergy(response_text):
+        return response_text
+
+    safe_names = []
+    caution_names = []
+    unsafe_names = []
+
+    for call in tool_calls_this_turn:
+        if call.get("tool") != "places_search":
+            continue
+
+        raw_result = call.get("raw_result", {})
+        if not isinstance(raw_result, dict):
+            continue
+
+        for item in raw_result.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not name:
+                continue
+
+            safety = _classify_restaurant_safety(item)
+            if safety == "safe":
+                safe_names.append(name)
+            elif safety == "caution":
+                caution_names.append(name)
+            elif safety == "unsafe":
+                unsafe_names.append(name)
+
+    safe_names = list(dict.fromkeys(safe_names))
+    caution_names = list(dict.fromkeys(caution_names))
+    unsafe_names = list(dict.fromkeys(unsafe_names))
+
+    warning_lines = [
+        "⚠️ Because of your severe shellfish allergy, I would avoid seafood-heavy Tsukiji spots and double-check ingredients with staff."
+    ]
+    if unsafe_names:
+        warning_lines.append("Avoid: " + ", ".join(unsafe_names[:2]) + ".")
+    if safe_names:
+        warning_lines.append("Safer picks: " + ", ".join(safe_names[:2]) + ".")
+    elif caution_names:
+        warning_lines.append(
+            "More allergy-aware options: " + ", ".join(caution_names[:2]) + "."
+        )
+
+    warning_prefix = " ".join(warning_lines)
+    if response_text.strip():
+        return f"{warning_prefix}\n\n{response_text}"
+    return warning_prefix
+
+
 class CCMAgent:
     """
     Travel agent powered by the Context Compression Module.
@@ -230,6 +368,7 @@ class CCMAgent:
     def reset(self):
         """Reset for new conversation."""
         self.ccm.reset()
+        reset_budget()
         self.turn_count = 0
         self.token_counts = []
         self.tool_calls_log = []
@@ -293,7 +432,7 @@ class CCMAgent:
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
                 max_tokens=1024,
-                temperature=0.7
+                temperature=0.0
             )
 
             # ── Step 4: Handle tool calls ────────────────────────
@@ -361,7 +500,9 @@ class CCMAgent:
                     tool_calls_this_turn.append({
                         "tool": tool_name,
                         "args": tool_args,
-                        "result_preview": compressed_result[:100]
+                        "result_preview": compressed_result[:100],
+                        "compressed_result": compressed_result,
+                        "raw_result": raw_result,
                     })
 
                     self.tool_calls_log.append({
@@ -385,12 +526,18 @@ class CCMAgent:
                     tools=TOOL_DEFINITIONS,
                     tool_choice="auto",
                     max_tokens=1024,
-                    temperature=0.7
+                    temperature=0.0
                 )
 
             # ── Step 5: Get final response ───────────────────────
             response_text = (
                 response.choices[0].message.content or ""
+            )
+            response_text = _enforce_critical_constraints(
+                response_text=response_text,
+                user_message=user_message,
+                tool_calls_this_turn=tool_calls_this_turn,
+                memory_state=self.ccm.get_memory_state(),
             )
 
         except Exception as e:

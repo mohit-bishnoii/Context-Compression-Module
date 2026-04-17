@@ -25,7 +25,8 @@ from travel_agent.tools import (
     web_search,
     places_search,
     weather_fetch,
-    budget_tracker
+    budget_tracker,
+    reset_budget,
 )
 from travel_agent.prompts import BASELINE_SYSTEM_PROMPT
 
@@ -186,6 +187,7 @@ class BaselineAgent:
         self.conversation_history = []
         self.token_counts_per_turn = []
         self.total_tool_calls = 0
+        reset_budget()
         print("[Baseline] Reset complete")
 
     def _count_context_tokens(self) -> int:
@@ -230,7 +232,7 @@ class BaselineAgent:
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
                 max_tokens=1024,
-                temperature=0.7
+                temperature=0.0
             )
 
             # Handle tool calls
@@ -307,7 +309,7 @@ class BaselineAgent:
                     tools=TOOL_DEFINITIONS,
                     tool_choice="auto",
                     max_tokens=1024,
-                    temperature=0.7
+                    temperature=0.0
                 )
 
             response_text = (

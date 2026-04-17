@@ -4,12 +4,14 @@
 
 
 def print_metrics_table(baseline_results: list, ccm_results: list):
-    """Print a side-by-side comparison table."""
+    """Print a side-by-side comparison table to stdout."""
     print("\n" + "=" * 72)
     print("EVALUATION RESULTS SUMMARY")
     print("=" * 72)
 
-    header = f"{'Test':<36} {'Baseline':^12} {'CCM':^12} {'Tokens (CCM)':>12}"
+    header = (
+        f"{'Test':<36} {'Baseline':^12} {'CCM':^12} {'Tok@key (CCM)':>12}"
+    )
     print(header)
     print("-" * 72)
 
@@ -23,21 +25,22 @@ def print_metrics_table(baseline_results: list, ccm_results: list):
     print("-" * 72)
 
     b_pass = sum(1 for r in baseline_results if r.get("passed"))
-    c_pass = sum(1 for r in ccm_results if r.get("passed"))
+    c_pass = sum(1 for r in ccm_results     if r.get("passed"))
     n      = len(ccm_results)
-
-    print(f"{'TOTAL':<36} {b_pass}/{n:^11} {c_pass}/{n:^11}")
+    print(f"{'TOTAL':<36} {b_pass}/{n:^10}  {c_pass}/{n:^10}")
 
     if baseline_results and ccm_results:
-        b_avg_tok = _safe_avg(
+        b_avg = _safe_avg(
             [r.get("tokens_at_key_turn", 0) for r in baseline_results]
         )
-        c_avg_tok = _safe_avg(
+        c_avg = _safe_avg(
             [r.get("tokens_at_key_turn", 0) for r in ccm_results]
         )
-        ratio = round(b_avg_tok / max(c_avg_tok, 1), 1)
-        print(f"\nAvg tokens at key turn — Baseline: {b_avg_tok:.0f}  "
-              f"CCM: {c_avg_tok:.0f}  Ratio: {ratio}x")
+        ratio = round(b_avg / max(c_avg, 1), 1)
+        print(
+            f"\nAvg tokens @ key turn — Baseline: {b_avg:.0f}  "
+            f"CCM: {c_avg:.0f}  Ratio: {ratio}x"
+        )
 
     print("=" * 72 + "\n")
 

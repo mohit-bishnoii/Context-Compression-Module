@@ -2,406 +2,384 @@
 #
 # Tier 2: Episodic Memory
 #
-# WHAT IT STORES:
-#   Summaries of conversation chunks.
-#   Created every N turns by summarizing what happened.
-#   Example: "Searched flights to Tokyo. ANA $780 direct approved.
-#              Hilton hotel rejected at $220, over budget."
+# Stores compressed summaries of conversation chunks.
+# Every N turns, CCMCore summarises the last N turns into
+# one short paragraph and calls episodic.add().
+# Those summaries are embedded as vectors and stored in ChromaDB.
+# On the next user turn, retrieve() finds the most relevant
+# summaries by cosine similarity.
 #
-# HOW IT WORKS:
-#   Each summary is embedded into a vector and stored in ChromaDB.
-#   When a new user message arrives, we embed the query and find
-#   the most semantically similar summaries.
-#   Only the top K relevant summaries get injected into the prompt.
+# STALE RULE (critical):
+#   All "stale" metadata values are stored as the STRING "false" or
+#   "true" — NEVER Python booleans.
+#   ChromaDB 0.5.x boolean filtering via `where` clauses is
+#   unreliable (known upstream issue). We filter stale entries
+#   manually in Python after fetching.
 #
-# WHY THIS IS NOT SIMPLE RAG:
-#   Simple RAG: search static documents, paste results
-#   Our system: dynamically CREATES memories from conversation,
-#               compresses before storing,
-#               marks stale when overridden,
-#               scores retrieved results by relevance,
-#               respects token budget during injection
-#
-# AGENT-CENTRIC:
-#   This class knows nothing about travel.
-#   It stores whatever summaries the CCM creates.
-#   Works identically for any agent domain.
+# AGENT-CENTRIC: knows nothing about travel, allergies, or Tokyo.
+# Stores whatever text the CCMCore gives it.
 
 import os
-os.environ["ANONYMIZED_TELEMETRY"] = "False"
-os.environ["CHROMA_TELEMETRY"] = "False"
 import uuid
 from datetime import datetime
 from typing import Optional
+
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+os.environ["CHROMA_TELEMETRY"]     = "False"
+
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-# ── Configuration ──────────────────────────────────────────────
-CHROMA_PATH = "./data/chroma_db"
-COLLECTION_NAME = "episodic_memory"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-DEFAULT_TOP_K = 5          # How many results to retrieve by default
-SIMILARITY_THRESHOLD = 0.3  # Minimum similarity score to include
-                            # Range: 0.0 (anything) to 1.0 (exact match)
-                            # 0.3 means loosely related = included
-                            # 0.7 means only very similar = strict
+# ── Config ──────────────────────────────────────────────────────
+CHROMA_PATH       = "./data/chroma_db"
+COLLECTION_NAME   = "episodic_memory"
+EMBEDDING_MODEL   = "all-MiniLM-L6-v2"
+DEFAULT_TOP_K     = 5
+SIMILARITY_THRESHOLD = 0.25   # lowered slightly so distant-but-relevant
+                               # memories still get retrieved
 
-# Shared embedding model — loaded once, reused everywhere
-# Loading takes ~2 seconds, so we do it at module level
-_embedding_model = None
+# Shared embedding model — loaded once, cached forever
+_embedding_model: Optional[SentenceTransformer] = None
 
 
 def get_embedding_model() -> SentenceTransformer:
-    """
-    Load embedding model once and cache it.
-    Subsequent calls return the cached instance instantly.
-    """
+    """Load the embedding model once, then reuse the cached instance."""
     global _embedding_model
     if _embedding_model is None:
-        print("[Embeddings] Loading all-MiniLM-L6-v2 model...")
+        print("[Embeddings] Loading all-MiniLM-L6-v2 …")
         _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
-        print("[Embeddings] Model loaded")
+        print("[Embeddings] Model ready")
     return _embedding_model
 
 
 def embed(text: str) -> list:
-    """
-    Convert text to a vector (list of 384 floats).
-    This is what enables semantic similarity search.
-    
-    Similar meaning → similar vector → found by RAG
-    Different meaning → different vector → not retrieved
-    """
+    """Convert a text string → 384-float vector for semantic search."""
     model = get_embedding_model()
-    vector = model.encode(text, normalize_embeddings=True)
-    return vector.tolist()
+    return model.encode(text, normalize_embeddings=True).tolist()
+
+
+# ── Stop-words for stale matching ───────────────────────────────
+_STOP = {
+    "a","an","the","is","are","was","were","and","or","but",
+    "in","on","at","to","for","of","with","by","from",
+    "trip","plan","planned","vacation","holiday","let","do",
+    "us","me","my","its","this","that","have","has","will",
+    "would","could","should","i","we","you","it","be","been",
+}
 
 
 class EpisodicMemory:
     """
-    Tier 2: Episodic Memory
-    
-    Stores summaries of conversation episodes in ChromaDB.
-    Each summary is embedded as a vector for semantic search.
-    
-    Lifecycle of an episodic memory:
-      1. Every N turns, CCM calls create_episode(turns)
-      2. The turns are summarized by the LLM (via compressor)
-      3. The summary is embedded and stored in ChromaDB
-      4. On next query, retrieve() finds relevant episodes
-      5. If something is cancelled, mark_stale_by_content() hides it
-    
-    The key insight: we store SUMMARIES not raw turns.
-    A 10-turn chunk that uses 2000 tokens becomes a
-    60-word summary using ~80 tokens. That is 25x compression
-    before we even do retrieval.
+    Tier 2 — Episodic Memory.
+
+    Public API (called by CCMCore):
+      add(summary_text, turn_range)            → memory_id: str
+      retrieve(query, top_k)                   → list[dict]
+      mark_stale_by_content(substring)         → int (count marked)
+      get_all_active()                         → list[dict]
+      get_count()                              → dict
+      reset()                                  → None
+
+    Internal storage:
+      ChromaDB persistent collection named "episodic_memory".
+      Every document has metadata including stale="false"|"true".
     """
 
     def __init__(self):
         os.makedirs(CHROMA_PATH, exist_ok=True)
         os.makedirs("data", exist_ok=True)
 
-        # Connect to ChromaDB (persistent — survives restarts)
         self.client = chromadb.PersistentClient(path=CHROMA_PATH)
-
-        # Get or create the episodic collection
-        # ChromaDB collections are like database tables
         self.collection = self.client.get_or_create_collection(
             name=COLLECTION_NAME,
-            metadata={
-                "description": "Episodic conversation summaries",
-                "hnsw:space": "cosine"  # Use cosine similarity
-                                         # Best for text embeddings
-            }
+            metadata={"hnsw:space": "cosine"},
         )
         print(
-            f"[EpisodicMemory] Ready. "
-            f"Contains {self.collection.count()} entries."
+            f"[EpisodicMemory] Ready — {self.collection.count()} entries."
         )
+
+    # ── Write ──────────────────────────────────────────────────
 
     def add(
         self,
         summary_text: str,
         turn_range: tuple = (0, 0),
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
     ) -> str:
         """
-        Store a new episodic summary.
-        
-        Parameters:
-          summary_text: The compressed summary text
-          turn_range:   (start_turn, end_turn) this summary covers
-          metadata:     Optional extra metadata to store
-        
-        Returns:
-          The unique ID assigned to this memory
-        
-        Example:
-          memory_id = episodic.add(
-            "Searched Tokyo hotels. Hilton $220 rejected.
-             Shinjuku Park $120 shortlisted.",
-            turn_range=(3, 7)
-          )
+        Store a new episode summary.
+
+        Parameters
+        ----------
+        summary_text : str
+            The compressed paragraph produced by _create_episode_summary().
+        turn_range : (int, int)
+            The conversation turn span this summary covers.
+        metadata : dict | None
+            Optional extra metadata.
+
+        Returns
+        -------
+        str
+            Unique memory ID, e.g. "ep_3f8a12b0c4d1".
+            Returns "" if nothing was stored.
         """
         if not summary_text or not summary_text.strip():
-            print("[EpisodicMemory] Empty summary, not storing")
+            print("[EpisodicMemory] Empty summary — skipping")
             return ""
 
-        # Generate unique ID for this memory
         memory_id = f"ep_{uuid.uuid4().hex[:12]}"
 
-        # Build metadata dict
-        # ChromaDB stores this alongside the vector
-        # We can filter by metadata during retrieval
-        entry_metadata = {
+        entry_meta = {
             "turn_start": turn_range[0],
             "turn_end":   turn_range[1],
             "created_at": datetime.now().isoformat(),
-            "stale":      "false",   
-            "type":       "episodic_summary"
+            "stale":      "false",   # ← always a STRING
+            "type":       "episodic_summary",
         }
-
-        # Merge any extra metadata passed in
         if metadata:
-            entry_metadata.update(metadata)
+            # Coerce any booleans to strings to be safe
+            for k, v in metadata.items():
+                entry_meta[k] = ("true" if v else "false") if isinstance(v, bool) else v
 
-        # Embed the summary text
-        # This converts text → 384 numbers representing meaning
         vector = embed(summary_text)
 
-        # Store in ChromaDB
-        # ChromaDB stores: text, vector, metadata, all linked by ID
         self.collection.add(
             documents=[summary_text],
             embeddings=[vector],
-            metadatas=[entry_metadata],
-            ids=[memory_id]
+            metadatas=[entry_meta],
+            ids=[memory_id],
         )
-
         print(
-            f"[EpisodicMemory] Stored: {memory_id} "
-            f"(turns {turn_range[0]}-{turn_range[1]})"
+            f"[EpisodicMemory] Stored {memory_id} "
+            f"(turns {turn_range[0]}–{turn_range[1]}): "
+            f"{summary_text[:80]}…"
         )
-        print(f"  Summary: {summary_text[:80]}...")
-
         return memory_id
+
+    # ── Read ───────────────────────────────────────────────────
 
     def retrieve(
         self,
         query: str,
         top_k: int = DEFAULT_TOP_K,
-        exclude_stale: bool = True
-        ) -> list:
+        exclude_stale: bool = True,
+    ) -> list:
         """
-        Retrieve relevant episodic memories.
+        Return the most semantically relevant episodic summaries.
 
-        KEY CHANGE: Filter stale entries in Python, not ChromaDB.
-        ChromaDB boolean filtering is unreliable across versions.
-        We fetch more results and filter manually.
+        How it works
+        ------------
+        1. Embed the query into a vector.
+        2. Ask ChromaDB for the nearest ``top_k * 3`` entries
+           (we fetch more so we have room to filter).
+        3. Filter stale entries in Python (not via ChromaDB where clause).
+        4. Filter by similarity threshold.
+        5. Return at most ``top_k`` results.
+
+        Returns
+        -------
+        list[dict]
+            Each dict: {id, text, similarity, metadata}
         """
-        if self.collection.count() == 0:
+        total = self.collection.count()
+        if total == 0:
             return []
 
-        # Fetch more than needed so we have room to filter stale
-        fetch_k = min(top_k * 3, self.collection.count())
+        fetch_k = min(top_k * 3, total)
         query_vector = embed(query)
 
         try:
-            # Fetch WITHOUT any where filter
-            # We will filter stale manually in Python
-            results = self.collection.query(
+            raw = self.collection.query(
                 query_embeddings=[query_vector],
                 n_results=fetch_k,
-                include=["documents", "metadatas", "distances"]
+                include=["documents", "metadatas", "distances"],
             )
-        except Exception as e:
-            print(f"[EpisodicMemory] Query error: {e}")
+        except Exception as exc:
+            print(f"[EpisodicMemory] query() error: {exc}")
             return []
 
-        documents = results.get("documents", [[]])[0]
-        metadatas = results.get("metadatas", [[]])[0]
-        distances = results.get("distances", [[]])[0]
-        ids = results.get("ids", [[]])[0]
+        docs      = raw.get("documents", [[]])[0]
+        metas     = raw.get("metadatas",  [[]])[0]
+        distances = raw.get("distances",  [[]])[0]
+        ids       = raw.get("ids",        [[]])[0]
 
-        retrieved = []
-        for doc, meta, dist, rid in zip(
-            documents, metadatas, distances, ids
-        ):
-            # MANUAL stale filter in Python — reliable
+        results = []
+        for doc, meta, dist, rid in zip(docs, metas, distances, ids):
+            # ── Stale filter (Python-side) ───────────────────
             if exclude_stale:
-                is_stale = meta.get("stale", False)
-                # Handle string "true"/"false" from ChromaDB
-                if isinstance(is_stale, str):
-                    is_stale = is_stale.lower() == "true"
+                raw_stale = meta.get("stale", "false")
+                is_stale = (
+                    raw_stale if isinstance(raw_stale, bool)
+                    else str(raw_stale).lower() == "true"
+                )
                 if is_stale:
-                    print(f"[EpisodicMemory] Skipping stale: {doc[:40]}")
+                    print(f"[EpisodicMemory] Skipping stale: {doc[:50]}")
                     continue
 
+            # ── Similarity filter ───────────────────────────
+            # ChromaDB cosine distance: 0=identical, 2=opposite
+            # Similarity = 1 − (distance / 2)
             similarity = 1.0 - (dist / 2.0)
-
             if similarity < SIMILARITY_THRESHOLD:
                 continue
 
-            retrieved.append({
-                "id": rid,
-                "text": doc,
+            results.append({
+                "id":         rid,
+                "text":       doc,
                 "similarity": round(similarity, 3),
-                "metadata": meta
+                "metadata":   meta,
             })
 
-            # Stop once we have enough
-            if len(retrieved) >= top_k:
+            if len(results) >= top_k:
                 break
 
-        if retrieved:
-            print(
-                f"[EpisodicMemory] Retrieved {len(retrieved)} memories"
-            )
-            for r in retrieved:
+        if results:
+            print(f"[EpisodicMemory] Retrieved {len(results)} memories:")
+            for r in results:
                 print(f"  [{r['similarity']:.2f}] {r['text'][:60]}")
         else:
             print("[EpisodicMemory] No relevant memories found")
 
-        return retrieved
+        return results
 
-    def mark_stale_by_content(self, substring: str) -> int:
+    # ── Stale management ────────────────────────────────────────
+
+    def mark_stale_by_content(self, cancelled_value: str) -> int:
         """
-        Mark all entries containing ANY word from substring as stale.
-        
-        KEY CHANGE: Instead of matching the full substring,
-        we extract significant words and match any of them.
-        This handles cases where the cancelled value phrase
-        differs from the stored memory text.
-        
-        Example:
-        cancelled value: "Bali beach vacation"
-        stored memory:   "Researched Bali resorts..."
-        "Bali" is the significant word → matches correctly
+        Mark all entries that contain any significant word from
+        ``cancelled_value`` as stale so they are never retrieved again.
+
+        Example
+        -------
+        cancelled_value = "Bali beach vacation"
+        significant words → ["bali", "beach"]
+        Entry "Researched Bali resorts…" → contains "bali" → marked stale ✓
+
+        Returns
+        -------
+        int : number of entries marked stale
         """
-        if self.collection.count() == 0:
+        total = self.collection.count()
+        if total == 0:
             return 0
 
-        # Extract significant words (ignore common words)
-        stop_words = {
-            'a', 'an', 'the', 'is', 'are', 'was', 'were',
-            'and', 'or', 'but', 'in', 'on', 'at', 'to',
-            'for', 'of', 'with', 'by', 'from', 'trip',
-            'plan', 'planned', 'vacation', 'holiday'
-        }
-        
-        words = substring.lower().split()
-        significant_words = [
-            w.strip('.,!?') for w in words
-            if w.strip('.,!?') not in stop_words
-            and len(w.strip('.,!?')) > 3
+        # Extract significant words
+        words = cancelled_value.lower().split()
+        significant = [
+            w.strip(".,!?'\"-") for w in words
+            if w.strip(".,!?'\"-") not in _STOP
+            and len(w.strip(".,!?'\"-")) > 2
         ]
-        
-        if not significant_words:
-            # Fall back to full substring if no significant words
-            significant_words = [substring.lower()]
-        
+        if not significant:
+            significant = [cancelled_value.lower()[:20]]
+
         print(
-            f"[EpisodicMemory] Marking stale entries containing: "
-            f"{significant_words}"
+            f"[EpisodicMemory] Marking stale entries "
+            f"containing any of: {significant}"
         )
 
         try:
             all_entries = self.collection.get(
                 include=["documents", "metadatas"]
             )
-        except Exception as e:
-            print(f"[EpisodicMemory] Error getting entries: {e}")
+        except Exception as exc:
+            print(f"[EpisodicMemory] get() error: {exc}")
             return 0
 
-        documents = all_entries.get("documents", [])
-        metadatas = all_entries.get("metadatas", [])
-        ids = all_entries.get("ids", [])
+        docs  = all_entries.get("documents", [])
+        metas = all_entries.get("metadatas",  [])
+        ids   = all_entries.get("ids",        [])
 
         stale_count = 0
-
-        for doc, meta, entry_id in zip(documents, metadatas, ids):
+        for doc, meta, eid in zip(docs, metas, ids):
             doc_lower = doc.lower()
-            
-            # Check if ANY significant word appears in the document
-            if any(word in doc_lower for word in significant_words):
-                if meta.get("stale", False):
-                    continue
 
-                updated_meta = dict(meta)
-                updated_meta["stale"]       = "true"          # ← STRING
-                updated_meta["staled_at"]   = datetime.now().isoformat()
-                updated_meta["stale_reason"] = f"Cancelled: {substring}"
-
-                self.collection.update(
-                    ids=[entry_id],
-                    metadatas=[updated_meta]
-                )
-                stale_count += 1
-                print(
-                    f"[EpisodicMemory] Marked stale: "
-                    f"{doc[:60]}..."
-                )
-
-        if stale_count > 0:
-            print(
-                f"[EpisodicMemory] Total marked stale: "
-                f"{stale_count} entries"
+            # Check if already stale
+            raw_stale = meta.get("stale", "false")
+            already_stale = (
+                raw_stale if isinstance(raw_stale, bool)
+                else str(raw_stale).lower() == "true"
             )
+            if already_stale:
+                continue
 
+            # Check if this entry mentions the cancelled topic
+            if not any(word in doc_lower for word in significant):
+                continue
+
+            # Mark it stale
+            updated = dict(meta)
+            updated["stale"]        = "true"   # ← STRING always
+            updated["staled_at"]    = datetime.now().isoformat()
+            updated["stale_reason"] = f"Cancelled: {cancelled_value}"
+
+            try:
+                self.collection.update(ids=[eid], metadatas=[updated])
+                stale_count += 1
+                print(f"[EpisodicMemory] Marked stale: {doc[:60]}")
+            except Exception as exc:
+                print(f"[EpisodicMemory] update() error on {eid}: {exc}")
+
+        print(f"[EpisodicMemory] Total marked stale: {stale_count}")
         return stale_count
 
+    # ── Utility ────────────────────────────────────────────────
+
     def get_all_active(self) -> list:
-        """Get all non-stale entries. Filters in Python (ChromaDB bool is unreliable)."""
+        """Return all non-stale entries. Filters in Python."""
         if self.collection.count() == 0:
             return []
         try:
-            results = self.collection.get(include=["documents", "metadatas"])
-        except Exception as e:
-            print(f"[EpisodicMemory] get_all_active error: {e}")
+            raw   = self.collection.get(include=["documents", "metadatas"])
+        except Exception as exc:
+            print(f"[EpisodicMemory] get_all_active error: {exc}")
             return []
 
         entries = []
         for doc, meta, eid in zip(
-            results.get("documents", []),
-            results.get("metadatas",  []),
-            results.get("ids",        [])
+            raw.get("documents", []),
+            raw.get("metadatas",  []),
+            raw.get("ids",        []),
         ):
-            raw = meta.get("stale", "false")
-            is_stale = raw if isinstance(raw, bool) else str(raw).lower() == "true"
+            raw_stale = meta.get("stale", "false")
+            is_stale  = (
+                raw_stale if isinstance(raw_stale, bool)
+                else str(raw_stale).lower() == "true"
+            )
             if not is_stale:
                 entries.append({"id": eid, "text": doc, "metadata": meta})
         return entries
 
     def get_count(self) -> dict:
-        """Return count statistics. Filters in Python (ChromaDB bool is unreliable)."""
+        """Return {total, active, stale}. Filters in Python."""
         total = self.collection.count()
         if total == 0:
             return {"total": 0, "active": 0, "stale": 0}
+
         try:
-            results  = self.collection.get(include=["metadatas"])
-            all_meta = results.get("metadatas", [])
+            raw      = self.collection.get(include=["metadatas"])
+            all_meta = raw.get("metadatas", [])
         except Exception:
             return {"total": total, "active": total, "stale": 0}
 
-        stale_count = 0
-        for meta in all_meta:
-            raw = meta.get("stale", "false")
-            is_stale = raw if isinstance(raw, bool) else str(raw).lower() == "true"
-            if is_stale:
-                stale_count += 1
-
+        stale_count = sum(
+            1 for m in all_meta
+            if (
+                m.get("stale") if isinstance(m.get("stale"), bool)
+                else str(m.get("stale", "false")).lower() == "true"
+            )
+        )
         return {"total": total, "active": total - stale_count, "stale": stale_count}
 
     def reset(self):
-        """
-        Delete all episodic memories. Called on new conversation.
-        """
+        """Delete the entire collection and recreate it fresh."""
         try:
             self.client.delete_collection(COLLECTION_NAME)
-            self.collection = self.client.get_or_create_collection(
-                name=COLLECTION_NAME,
-                metadata={"hnsw:space": "cosine"}
-            )
-            print("[EpisodicMemory] Reset complete")
-        except Exception as e:
-            print(f"[EpisodicMemory] Reset error: {e}")
+        except Exception:
+            pass
+        self.collection = self.client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+        print("[EpisodicMemory] Reset complete")

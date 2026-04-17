@@ -2,12 +2,21 @@
 #
 # Tier 3: Semantic / Archived Memory
 #
-# Stores compressed tool results for RAG retrieval.
-# Completely rewritten for reliability:
-#   - Stale stored as string "true"/"false" (ChromaDB bool bug fix)
-#   - Filtering done in Python not ChromaDB where clause
-#   - Supports both persistent (production) and in-memory (testing)
-#   - Clear logging for every operation
+# Stores COMPRESSED tool results for later RAG retrieval.
+# When the agent calls places_search("hotels Tokyo") and gets
+# 600 tokens back, the CCM compresses it to ~80 tokens and
+# stores that compressed version here.
+#
+# Later, when the user asks "remind me what hotels we found",
+# retrieve() finds the right archived result by semantic similarity.
+#
+# KEY DIFFERENCES from EpisodicMemory:
+#   - Documents are tool results, not conversation summaries
+#   - Metadata includes tool_name and query_used
+#   - The TEXT embedded is "Query: X\nResult: Y" so the vector
+#     captures both the question and the answer
+#
+# STALE RULE: identical to EpisodicMemory — string "false"/"true".
 
 import os
 import uuid
@@ -15,62 +24,52 @@ from datetime import datetime
 from typing import Optional
 
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
-os.environ["CHROMA_TELEMETRY"] = "False"
+os.environ["CHROMA_TELEMETRY"]     = "False"
 
 import chromadb
-from ccm.episodic_memory import embed
+from ccm.episodic_memory import embed   # reuse the same embedding fn
 
-CHROMA_PATH = "./data/chroma_db"
-COLLECTION_NAME = "semantic_memory"
-DEFAULT_TOP_K = 3
-SIMILARITY_THRESHOLD = 0.3
+CHROMA_PATH      = "./data/chroma_db"
+COLLECTION_NAME  = "semantic_memory"
+DEFAULT_TOP_K    = 3
+SIMILARITY_THRESHOLD = 0.25
+
+_STOP = {
+    "a","an","the","is","are","was","were","and","or","but",
+    "in","on","at","to","for","of","with","by","from",
+    "trip","plan","planned","vacation","holiday","let","do",
+    "us","me","my","its","this","that","have","has","will",
+    "would","could","should","i","we","you","it","be","been",
+}
 
 
 class SemanticMemory:
     """
-    Tier 3: Semantic / Archived Memory
+    Tier 3 — Semantic / Archived Memory.
 
-    Stores compressed tool results.
-    Retrieved via vector similarity search (RAG).
-
-    Key design decisions:
-    - Stale stored as string "true"/"false" not boolean
-      because ChromaDB metadata boolean filtering is
-      unreliable across versions
-    - Stale filtering happens in Python after fetch
-    - Supports in_memory mode for testing (no file locks)
-
-    Agent-centric: stores any tool result from any domain.
-    Does not know about travel specifically.
+    Public API (called by CCMCore):
+      add(compressed_result, tool_name, query_used, turn_number) → id
+      retrieve(query, top_k, tool_filter, exclude_stale)         → list
+      mark_stale_by_content(substring)                           → int
+      get_all_active()                                           → list
+      get_count()                                                → dict
+      reset()                                                    → None
     """
 
-    def __init__(self, in_memory: bool = False):
-        """
-        Parameters:
-          in_memory: True  = RAM only, no files (use for testing)
-                     False = persists to disk (use in production)
-        """
+    def __init__(self):
         os.makedirs(CHROMA_PATH, exist_ok=True)
         os.makedirs("data", exist_ok=True)
 
-        if in_memory:
-            self.client = chromadb.EphemeralClient()
-            self._mode = "in-memory"
-        else:
-            self.client = chromadb.PersistentClient(path=CHROMA_PATH)
-            self._mode = "persistent"
-
+        self.client = chromadb.PersistentClient(path=CHROMA_PATH)
         self.collection = self.client.get_or_create_collection(
             name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"}
+            metadata={"hnsw:space": "cosine"},
         )
-
         print(
-            f"[SemanticMemory] Ready ({self._mode}). "
-            f"Contains {self.collection.count()} entries."
+            f"[SemanticMemory] Ready — {self.collection.count()} entries."
         )
 
-    # ── Write Operations ────────────────────────────────────────
+    # ── Write ──────────────────────────────────────────────────
 
     def add(
         self,
@@ -78,385 +77,280 @@ class SemanticMemory:
         tool_name: str,
         query_used: str,
         turn_number: int = 0,
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
     ) -> str:
         """
         Store a compressed tool result.
 
-        The text embedded is query + result combined.
-        This makes retrieval work better because future queries
-        about the same topic find this entry more reliably.
+        The text that gets EMBEDDED is:
+          "Query: <query_used>\nResult: <compressed_result>"
+        This means future queries about the same topic will find
+        this entry even if they use slightly different words.
 
-        Parameters:
-          compressed_result: Already-compressed tool output string
-          tool_name:         Name of tool that produced this
-          query_used:        Query passed to the tool
-          turn_number:       Conversation turn number
-          metadata:          Optional extra metadata
+        Parameters
+        ----------
+        compressed_result : str
+            The ~80-token summary produced by ToolCompressor.
+        tool_name : str
+            e.g. "places_search", "web_search"
+        query_used : str
+            The query that was passed to the tool.
+        turn_number : int
+            Conversation turn (for debugging / UI display).
 
-        Returns:
-          Unique ID string or empty string if failed
+        Returns
+        -------
+        str
+            Unique memory ID, e.g. "sem_4a1b2c3d4e5f".
         """
         if not compressed_result or not compressed_result.strip():
-            print("[SemanticMemory] Empty result, skipping")
+            print("[SemanticMemory] Empty result — skipping")
             return ""
 
         memory_id = f"sem_{uuid.uuid4().hex[:12]}"
 
         # Embed query + result together
-        # This improves retrieval because the embedding
-        # captures both the question and the answer context
-        embeddable_text = (
-            f"Query: {query_used}\n"
-            f"Result: {compressed_result}"
-        )
+        embeddable = f"Query: {query_used}\nResult: {compressed_result}"
 
-        entry_metadata = {
-            "tool_name": tool_name,
+        entry_meta = {
+            "tool_name":  tool_name,
             "query_used": query_used,
             "turn_number": turn_number,
             "created_at": datetime.now().isoformat(),
-            "stale": "false",   # STRING not bool
-            "type": "tool_result"
+            "stale":      "false",   # ← STRING always
+            "type":       "tool_result",
         }
-
         if metadata:
-            # Ensure no boolean values in metadata
             for k, v in metadata.items():
-                if isinstance(v, bool):
-                    metadata[k] = "true" if v else "false"
-            entry_metadata.update(metadata)
+                entry_meta[k] = ("true" if v else "false") if isinstance(v, bool) else v
 
-        try:
-            vector = embed(embeddable_text)
-            self.collection.add(
-                documents=[compressed_result],
-                embeddings=[vector],
-                metadatas=[entry_metadata],
-                ids=[memory_id]
-            )
-            print(
-                f"[SemanticMemory] Stored {tool_name} result: "
-                f"{memory_id}"
-            )
-            print(f"  Content: {compressed_result[:80]}...")
-            return memory_id
+        vector = embed(embeddable)
 
-        except Exception as e:
-            print(f"[SemanticMemory] Add error: {e}")
-            return ""
+        self.collection.add(
+            documents=[compressed_result],
+            embeddings=[vector],
+            metadatas=[entry_meta],
+            ids=[memory_id],
+        )
+        print(
+            f"[SemanticMemory] Stored [{tool_name}] {memory_id}: "
+            f"{compressed_result[:80]}…"
+        )
+        return memory_id
 
-    # ── Read Operations ─────────────────────────────────────────
+    # ── Read ───────────────────────────────────────────────────
 
     def retrieve(
         self,
         query: str,
         top_k: int = DEFAULT_TOP_K,
         tool_filter: Optional[str] = None,
-        exclude_stale: bool = True
+        exclude_stale: bool = True,
     ) -> list:
         """
-        Find relevant archived tool results for a query.
+        Find relevant archived tool results.
 
-        HOW IT WORKS:
-          1. Embed the query into a vector
-          2. Fetch top_k * 3 results by vector similarity
-             (fetch more so we have room to filter)
-          3. Filter stale entries in Python (not ChromaDB)
-          4. Apply tool_filter if specified
-          5. Return top_k results
+        Parameters
+        ----------
+        query : str
+            Current user message or topic.
+        top_k : int
+            Max results to return.
+        tool_filter : str | None
+            If set, only return results from this tool.
+        exclude_stale : bool
+            Skip entries marked stale.
 
-        Parameters:
-          query:        Current user message or search topic
-          top_k:        Maximum results to return
-          tool_filter:  If set, only return results from this tool
-          exclude_stale: Skip stale entries
-
-        Returns:
-          List of dicts:
-          {id, text, similarity, tool_name, query_used, metadata}
+        Returns
+        -------
+        list[dict]
+            Each dict: {id, text, similarity, tool_name, query_used, metadata}
         """
         total = self.collection.count()
         if total == 0:
-            print("[SemanticMemory] Collection is empty")
             return []
 
-        # Fetch more than needed to allow for filtering
-        fetch_k = min(top_k * 3, total)
+        fetch_k      = min(top_k * 3, total)
+        query_vector = embed(query)
 
         try:
-            query_vector = embed(query)
-            results = self.collection.query(
+            raw = self.collection.query(
                 query_embeddings=[query_vector],
                 n_results=fetch_k,
-                include=["documents", "metadatas", "distances"]
+                include=["documents", "metadatas", "distances"],
             )
-        except Exception as e:
-            print(f"[SemanticMemory] Query error: {e}")
+        except Exception as exc:
+            print(f"[SemanticMemory] query() error: {exc}")
             return []
 
-        documents = results.get("documents", [[]])[0]
-        metadatas = results.get("metadatas", [[]])[0]
-        distances = results.get("distances", [[]])[0]
-        ids = results.get("ids", [[]])[0]
+        docs      = raw.get("documents", [[]])[0]
+        metas     = raw.get("metadatas",  [[]])[0]
+        distances = raw.get("distances",  [[]])[0]
+        ids       = raw.get("ids",        [[]])[0]
 
-        if not documents:
-            print("[SemanticMemory] No results from ChromaDB")
-            return []
-
-        retrieved = []
-
-        for doc, meta, dist, rid in zip(
-            documents, metadatas, distances, ids
-        ):
-            # ── Stale filter (Python-side) ───────────────────────
+        results = []
+        for doc, meta, dist, rid in zip(docs, metas, distances, ids):
+            # Stale filter
             if exclude_stale:
-                stale_raw = meta.get("stale", "false")
-                # Handle bool True/False AND string "true"/"false"
-                if isinstance(stale_raw, bool):
-                    is_stale = stale_raw
-                elif isinstance(stale_raw, str):
-                    is_stale = stale_raw.lower() == "true"
-                else:
-                    is_stale = False
-
+                raw_stale = meta.get("stale", "false")
+                is_stale  = (
+                    raw_stale if isinstance(raw_stale, bool)
+                    else str(raw_stale).lower() == "true"
+                )
                 if is_stale:
-                    print(
-                        f"[SemanticMemory] Skipping stale: "
-                        f"{doc[:40]}..."
-                    )
+                    print(f"[SemanticMemory] Skipping stale: {doc[:50]}")
                     continue
 
-            # ── Tool filter ──────────────────────────────────────
-            if tool_filter:
-                if meta.get("tool_name") != tool_filter:
-                    continue
+            # Tool filter
+            if tool_filter and meta.get("tool_name") != tool_filter:
+                continue
 
-            # ── Similarity threshold ─────────────────────────────
-            # ChromaDB cosine distance: 0 = identical, 2 = opposite
-            # Convert to similarity: 1 - (distance / 2)
+            # Similarity filter
             similarity = 1.0 - (dist / 2.0)
             if similarity < SIMILARITY_THRESHOLD:
                 continue
 
-            retrieved.append({
-                "id": rid,
-                "text": doc,
+            results.append({
+                "id":         rid,
+                "text":       doc,
                 "similarity": round(similarity, 3),
-                "tool_name": meta.get("tool_name", "unknown"),
+                "tool_name":  meta.get("tool_name", "unknown"),
                 "query_used": meta.get("query_used", ""),
-                "metadata": meta
+                "metadata":   meta,
             })
 
-            # Stop once we have enough
-            if len(retrieved) >= top_k:
+            if len(results) >= top_k:
                 break
 
-        if retrieved:
-            print(
-                f"[SemanticMemory] Retrieved "
-                f"{len(retrieved)} archived results"
-            )
-            for r in retrieved:
-                print(
-                    f"  [{r['similarity']:.2f}] "
-                    f"[{r['tool_name']}] {r['text'][:60]}..."
-                )
+        if results:
+            print(f"[SemanticMemory] Retrieved {len(results)} archives:")
+            for r in results:
+                print(f"  [{r['similarity']:.2f}] [{r['tool_name']}] {r['text'][:60]}")
         else:
             print("[SemanticMemory] No relevant archives found")
 
-        return retrieved
+        return results
 
-    # ── Stale Operations ────────────────────────────────────────
+    # ── Stale management ────────────────────────────────────────
 
-    def mark_stale_by_content(self, substring: str) -> int:
+    def mark_stale_by_content(self, cancelled_value: str) -> int:
         """
         Mark entries containing any significant word from
-        substring as stale. They will be skipped in retrieval.
+        ``cancelled_value`` as stale.
 
-        Uses word-level matching, not full phrase matching,
-        because stored text may use different phrasing than
-        the cancelled value.
-
-        Example:
-          substring = "Bali beach vacation"
-          significant words = ["bali", "beach"]
-          Matches: "Researched Bali resorts" ← contains "bali"
-          Does not match: "Tokyo hotels" ← no match
-
-        Returns:
-          Number of entries marked stale
+        Mirrors EpisodicMemory.mark_stale_by_content() exactly.
         """
         total = self.collection.count()
         if total == 0:
             return 0
 
-        # Extract significant words
-        stop_words = {
-            'a', 'an', 'the', 'is', 'are', 'was', 'were',
-            'and', 'or', 'but', 'in', 'on', 'at', 'to',
-            'for', 'of', 'with', 'by', 'from', 'trip',
-            'plan', 'planned', 'vacation', 'holiday', 'let',
-            'do', 'us', 'me', 'my', 'its', 'this', 'that',
-            'have', 'has', 'will', 'would', 'could', 'should'
-        }
-
-        words = substring.lower().split()
+        words = cancelled_value.lower().split()
         significant = [
-            w.strip('.,!?\'\"')
-            for w in words
-            if w.strip('.,!?\'\"') not in stop_words
-            and len(w.strip('.,!?\'\"')) > 3
+            w.strip(".,!?'\"-") for w in words
+            if w.strip(".,!?'\"-") not in _STOP
+            and len(w.strip(".,!?'\"-")) > 2
         ]
-
         if not significant:
-            significant = [substring.lower()[:20]]
+            significant = [cancelled_value.lower()[:20]]
 
         print(
-            f"[SemanticMemory] Looking for stale entries "
-            f"containing: {significant}"
+            f"[SemanticMemory] Marking stale entries "
+            f"containing any of: {significant}"
         )
 
         try:
-            all_entries = self.collection.get(
-                include=["documents", "metadatas"]
-            )
-        except Exception as e:
-            print(f"[SemanticMemory] Get error: {e}")
+            all_entries = self.collection.get(include=["documents", "metadatas"])
+        except Exception as exc:
+            print(f"[SemanticMemory] get() error: {exc}")
             return 0
 
-        documents = all_entries.get("documents", [])
-        metadatas = all_entries.get("metadatas", [])
-        ids = all_entries.get("ids", [])
+        docs  = all_entries.get("documents", [])
+        metas = all_entries.get("metadatas",  [])
+        ids   = all_entries.get("ids",        [])
 
         stale_count = 0
-
-        for doc, meta, entry_id in zip(documents, metadatas, ids):
+        for doc, meta, eid in zip(docs, metas, ids):
             doc_lower = doc.lower()
 
-            # Check if any significant word appears in document
-            if not any(word in doc_lower for word in significant):
+            raw_stale = meta.get("stale", "false")
+            already   = (
+                raw_stale if isinstance(raw_stale, bool)
+                else str(raw_stale).lower() == "true"
+            )
+            if already:
                 continue
 
-            # Skip if already stale
-            stale_raw = meta.get("stale", "false")
-            if isinstance(stale_raw, bool):
-                already_stale = stale_raw
-            else:
-                already_stale = str(stale_raw).lower() == "true"
-
-            if already_stale:
+            if not any(w in doc_lower for w in significant):
                 continue
 
-            # Mark as stale
-            updated_meta = dict(meta)
-            updated_meta["stale"] = "true"  # Always string
-            updated_meta["staled_at"] = datetime.now().isoformat()
-            updated_meta["stale_reason"] = f"Cancelled: {substring}"
+            updated = dict(meta)
+            updated["stale"]        = "true"
+            updated["staled_at"]    = datetime.now().isoformat()
+            updated["stale_reason"] = f"Cancelled: {cancelled_value}"
 
             try:
-                self.collection.update(
-                    ids=[entry_id],
-                    metadatas=[updated_meta]
-                )
+                self.collection.update(ids=[eid], metadatas=[updated])
                 stale_count += 1
-                print(
-                    f"[SemanticMemory] Marked stale: "
-                    f"{doc[:60]}..."
-                )
-            except Exception as e:
-                print(f"[SemanticMemory] Update error: {e}")
+                print(f"[SemanticMemory] Marked stale: {doc[:60]}")
+            except Exception as exc:
+                print(f"[SemanticMemory] update() error on {eid}: {exc}")
 
-        if stale_count > 0:
-            print(
-                f"[SemanticMemory] Total marked stale: "
-                f"{stale_count}"
-            )
-        else:
-            print(
-                f"[SemanticMemory] No entries found "
-                f"containing {significant}"
-            )
-
+        print(f"[SemanticMemory] Total marked stale: {stale_count}")
         return stale_count
 
-    # ── Utility Operations ───────────────────────────────────────
+    # ── Utility ────────────────────────────────────────────────
 
     def get_all_active(self) -> list:
-        """
-        Get all non-stale entries.
-        Used by Gradio UI to display memory state.
-        """
-        total = self.collection.count()
-        if total == 0:
+        """Return all non-stale entries. Filters in Python."""
+        if self.collection.count() == 0:
             return []
-
         try:
-            results = self.collection.get(
-                include=["documents", "metadatas"]
-            )
-        except Exception as e:
-            print(f"[SemanticMemory] Get error: {e}")
+            raw = self.collection.get(include=["documents", "metadatas"])
+        except Exception as exc:
+            print(f"[SemanticMemory] get_all_active error: {exc}")
             return []
 
-        entries = []
-        for doc, meta, entry_id in zip(
-            results.get("documents", []),
-            results.get("metadatas", []),
-            results.get("ids", [])
-        ):
-            stale_raw = meta.get("stale", "false")
-            if isinstance(stale_raw, bool):
-                is_stale = stale_raw
-            else:
-                is_stale = str(stale_raw).lower() == "true"
-
-            if not is_stale:
-                entries.append({
-                    "id": entry_id,
-                    "text": doc,
-                    "tool_name": meta.get("tool_name", "unknown"),
-                    "metadata": meta
-                })
-
-        return entries
+        return [
+            {"id": eid, "text": doc, "tool_name": meta.get("tool_name"), "metadata": meta}
+            for doc, meta, eid in zip(
+                raw.get("documents", []),
+                raw.get("metadatas",  []),
+                raw.get("ids",        []),
+            )
+            if not (
+                meta.get("stale") if isinstance(meta.get("stale"), bool)
+                else str(meta.get("stale", "false")).lower() == "true"
+            )
+        ]
 
     def get_count(self) -> dict:
-        """Return count statistics."""
+        """Return {total, active, stale}."""
         total = self.collection.count()
         if total == 0:
             return {"total": 0, "active": 0, "stale": 0}
-
         try:
-            all_meta = self.collection.get(
-                include=["metadatas"]
-            ).get("metadatas", [])
+            raw      = self.collection.get(include=["metadatas"])
+            all_meta = raw.get("metadatas", [])
         except Exception:
             return {"total": total, "active": total, "stale": 0}
 
-        stale_count = 0
-        for meta in all_meta:
-            stale_raw = meta.get("stale", "false")
-            if isinstance(stale_raw, bool):
-                if stale_raw:
-                    stale_count += 1
-            elif str(stale_raw).lower() == "true":
-                stale_count += 1
-
-        return {
-            "total": total,
-            "active": total - stale_count,
-            "stale": stale_count
-        }
+        stale_count = sum(
+            1 for m in all_meta
+            if (
+                m.get("stale") if isinstance(m.get("stale"), bool)
+                else str(m.get("stale", "false")).lower() == "true"
+            )
+        )
+        return {"total": total, "active": total - stale_count, "stale": stale_count}
 
     def reset(self):
-        """Delete all entries. Called on new conversation."""
+        """Delete the entire collection and recreate fresh."""
         try:
             self.client.delete_collection(COLLECTION_NAME)
-            self.collection = self.client.get_or_create_collection(
-                name=COLLECTION_NAME,
-                metadata={"hnsw:space": "cosine"}
-            )
-            print("[SemanticMemory] Reset complete")
-        except Exception as e:
-            print(f"[SemanticMemory] Reset error: {e}")
+        except Exception:
+            pass
+        self.collection = self.client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+        print("[SemanticMemory] Reset complete")
