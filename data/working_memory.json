@@ -1,0 +1,12 @@
+{
+  "facts": {
+    "critical": [],
+    "important": [],
+    "contextual": []
+  },
+  "decisions": [],
+  "cancelled": [],
+  "turn_count": 3,
+  "conversation_id": "",
+  "last_updated": "2026-04-19T00:29:18.809350"
+}
