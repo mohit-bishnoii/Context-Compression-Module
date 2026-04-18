@@ -1,18 +1,7 @@
-# Virtual environments
-chroma_env/
+.env
 venv/
-venv310/
-
-# Python cache
 __pycache__/
 *.pyc
-
-# Env file
-.env
-
-# Database
-chroma_db/
-data/
-
-# Mac
+data/chroma_db/
 .DS_Store
+.venv/

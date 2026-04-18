@@ -1,0 +1,98 @@
+=======================================================
+FULL SYSTEM TEST
+Running from: /home/teaching/Documents/HACK60/Context-Compression-Module
+=======================================================
+
+... (Tests 1-4 Output Truncated for Brevity) ...
+
+--- Turn 4 ---
+User: Find dinner restaurants near Tsukiji fish market in Tokyo
+
+==================================================
+[CCM] Turn 4
+==================================================
+[CCM] Step 1: Extracting facts…
+[Extractor] Found 1 facts:
+  [contextual ] destination_city               → Tokyo
+[CCM] Step 2: Checking stale context…
+[CCM] Step 3: Retrieving memories…
+
+[Retriever] Query: 'Find dinner restaurants near Tsukiji fish market in Tokyo'
+[SemanticMemory] Retrieved 3 archives:
+  [0.79] [places_search] Here is the compressed summary:
+Top 3 places to visit in Ja
+  [0.73] [places_search] Here is the compressed summary:
+Top 3 options for places to
+  [0.73] [places_search] Here is the compressed summary:
+Top 3 options for places to
+[Retriever] Stage 1: 0 episodic, 3 semantic
+[Retriever] Final: 0 episodic, 3 semantic, ~245 tokens
+[CCM] Step 4: Assembling context…
+[Assembler] Context assembled: 602 tokens
+  Breakdown: {'working_memory': 27, 'semantic': 328, 'recent_turns': 188}
+[CCM] Context ready: 602 tokens (baseline would be ~164)
+  [CCMAgent] Tool call: places_search({'budget_per_night': 0, 'category': 'restaurants', 'location': 'Tsukiji fish market, Tokyo'})
+[CCM] Compressing tool result: places_search
+[Compressor] places_search: 362→65 tokens (5.6x)
+[SemanticMemory] Stored [places_search] sem_53694fb1b0b5: Here is the compressed summary:
+Top 3 places to visit in Japan:
+- Yabusoba (Kan…
+
+[CCM] Episode stored: Rejected Sheraton Miyako Hotel Tokyo at $400/night due to exceeding budget. Shor…
+Tokens in context: 1252
+Agent: ⚠️ Considering your severe shellfish allergy, I would recommend avoiding any restaurants near Tsukiji fish market that serve seafood. 
+
+Next step: Please specify your preferred restaurant category (e.…
+
+───────────────────────────────────────────────────────
+FULL FINAL RESPONSE:
+⚠️ Considering your severe shellfish allergy, I would recommend avoiding any restaurants near Tsukiji fish market that serve seafood. 
+
+Next step: Please specify your preferred restaurant category (e.g. Japanese, Italian, etc.) to find suitable options within your constraints.
+───────────────────────────────────────────────────────
+
+Allergy mentioned in final response: True
+✅ TEST 5 PASSED
+
+(sleeping 4.0s…)
+
+=======================================================
+TEST 6: Baseline Fails (proves the problem exists)
+=======================================================
+
+Turn 1: I want to plan a 5-day trip to Tokyo and Kyoto. My total bud...
+  [Baseline] Tool: budget_tracker
+  [Baseline] Tool: places_search
+  [Baseline] Tool: places_search
+  [Baseline] Tool: places_search
+  [Baseline] Tool: places_search
+  [Baseline] Tool: places_search
+  [Baseline] Tool: places_search
+  [Baseline] Tool: web_search
+  [Baseline] Tool: weather_fetch
+  [Baseline] Tool: weather_fetch
+
+... (Context continues to grow uncompressed) ...
+
+Turn 15: Find me the best dinner spots in the Tsukiji area...
+[Baseline] Error: Error code: 413 - {'error': {'message': 'Request too large for model `llama-3.1-8b-instant` in organization `org_01kpfxnbexfwdthvfr46v2ke9a` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 6939, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}
+Tokens: 6283
+Response: CONTEXT OVERFLOW ERROR: Too much history for the model to process. This is the failure that CCM prev...
+
+Token growth per turn: [4958, 5203, 5895, 5930, 5963, 5994, 6025, 6059, 6088, 6121, 6152, 6187, 6217, 6248, 6283]
+Context overflow occurred (>6000 tokens): True
+Severe token inefficiency occurred (>=4500 tokens): True
+Baseline still remembered allergy at final turn: False
+PASS TEST 6 PASSED (baseline correctly failed)
+
+=======================================================
+FINAL RESULTS
+=======================================================
+  ✅ PASS  memory_extraction
+  ✅ PASS  stale_detection
+  ❌ FAIL  compression
+  ✅ PASS  rag_retrieval
+  ✅ PASS  ccm_allergy
+  ✅ PASS  baseline_fails
+
+5/6 tests passed

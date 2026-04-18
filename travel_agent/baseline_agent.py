@@ -177,7 +177,7 @@ class BaselineAgent:
 
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "llama-3.1-8b-instant"
+        self.model = "llama-3.3-70b-versatile"
         self.conversation_history = []
         self.token_counts_per_turn = []
         self.total_tool_calls = 0
@@ -232,7 +232,8 @@ class BaselineAgent:
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
                 max_tokens=1024,
-                temperature=0.0
+                temperature=0.0,
+                parallel_tool_calls=False
             )
 
             # Handle tool calls
@@ -309,7 +310,8 @@ class BaselineAgent:
                     tools=TOOL_DEFINITIONS,
                     tool_choice="auto",
                     max_tokens=1024,
-                    temperature=0.0
+                    temperature=0.0,
+                    parallel_tool_calls=False
                 )
 
             response_text = (
