@@ -77,8 +77,8 @@ A free Groq API key → https://console.groq.com
 ```
 
 ```bash
-git clone https://github.com/your-username/travel-ccm.git
-cd travel-ccm
+git clone https://github.com/mohit-bishnoii/Context-Compression-Module.git
+cd Context-Compression-Module
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
