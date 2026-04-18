@@ -94,17 +94,17 @@ def reset_all_storage():
     time.sleep(0.5)
 
     # Step 4: delete and recreate folder
-    if os.path.exists(CHROMA_PATH):
-        try:
-            shutil.rmtree(CHROMA_PATH)
-            print("[Reset] ChromaDB folder deleted")
-        except PermissionError:
-            print("[Reset] Folder locked — collections were cleared above (OK)")
-        except Exception as exc:
-            print(f"[Reset] Folder delete error: {exc}")
-
-    os.makedirs(CHROMA_PATH, exist_ok=True)
-    time.sleep(0.3)
+    # if os.path.exists(CHROMA_PATH):
+    #     try:
+    #         shutil.rmtree(CHROMA_PATH)
+    #         print("[Reset] ChromaDB folder deleted")
+    #     except PermissionError:
+    #         print("[Reset] Folder locked — collections were cleared above (OK)")
+    #     except Exception as exc:
+    #         print(f"[Reset] Folder delete error: {exc}")
+    # 
+    # os.makedirs(CHROMA_PATH, exist_ok=True)
+    # time.sleep(0.3)
     print("[Reset] Storage reset complete\n")
 
 

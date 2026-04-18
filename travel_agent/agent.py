@@ -353,7 +353,7 @@ class CCMAgent:
 
     def __init__(self, use_reranking: bool = True):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "llama-3.1-8b-instant"
+        self.model = "llama-3.3-70b-versatile"
 
         # The CCM handles all memory
         self.ccm = ContextCompressionModule(
@@ -432,7 +432,8 @@ class CCMAgent:
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
                 max_tokens=1024,
-                temperature=0.0
+                temperature=0.0,
+                parallel_tool_calls=False
             )
 
             # ── Step 4: Handle tool calls ────────────────────────
@@ -448,11 +449,8 @@ class CCMAgent:
                 tool_round += 1
                 tool_calls = response.choices[0].message.tool_calls
 
-                # Build a mini message list for this tool round
-                # We keep it SHORT — only system + context + tool results
-                # Not the full history like baseline does
-                tool_messages = messages.copy()
-                tool_messages.append({
+                # Add assistant message with tool calls to the accumulated messages
+                messages.append({
                     "role": "assistant",
                     "content": (
                         response.choices[0].message.content or ""
@@ -513,7 +511,7 @@ class CCMAgent:
 
                     # Add COMPRESSED result to messages
                     # (baseline adds raw result — much larger)
-                    tool_messages.append({
+                    messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": compressed_result
@@ -522,11 +520,12 @@ class CCMAgent:
                 # Call LLM again with compressed tool results
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    messages=tool_messages,
+                    messages=messages,
                     tools=TOOL_DEFINITIONS,
                     tool_choice="auto",
                     max_tokens=1024,
-                    temperature=0.0
+                    temperature=0.0,
+                    parallel_tool_calls=False
                 )
 
             # ── Step 5: Get final response ───────────────────────

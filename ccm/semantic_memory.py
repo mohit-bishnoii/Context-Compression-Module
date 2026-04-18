@@ -134,7 +134,7 @@ class SemanticMemory:
         )
         print(
             f"[SemanticMemory] Stored [{tool_name}] {memory_id}: "
-            f"{compressed_result[:80]}…"
+            f"{compressed_result[:200]}…"
         )
         return memory_id
 
@@ -225,7 +225,7 @@ class SemanticMemory:
         if results:
             print(f"[SemanticMemory] Retrieved {len(results)} archives:")
             for r in results:
-                print(f"  [{r['similarity']:.2f}] [{r['tool_name']}] {r['text'][:60]}")
+                print(f"  [{r['similarity']:.2f}] [{r['tool_name']}] {r['text'][:200]}")
         else:
             print("[SemanticMemory] No relevant archives found")
 
