@@ -31,7 +31,7 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 
 # ── Config ──────────────────────────────────────────────────────
-CHROMA_PATH       = "./data/chroma_db"
+CHROMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "chroma_db")
 COLLECTION_NAME   = "episodic_memory"
 EMBEDDING_MODEL   = "all-MiniLM-L6-v2"
 DEFAULT_TOP_K     = 5

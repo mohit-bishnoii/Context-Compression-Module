@@ -29,7 +29,7 @@ os.environ["CHROMA_TELEMETRY"]     = "False"
 import chromadb
 from ccm.episodic_memory import embed   # reuse the same embedding fn
 
-CHROMA_PATH      = "./data/chroma_db"
+CHROMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "chroma_db")
 COLLECTION_NAME  = "semantic_memory"
 DEFAULT_TOP_K    = 3
 SIMILARITY_THRESHOLD = 0.25
