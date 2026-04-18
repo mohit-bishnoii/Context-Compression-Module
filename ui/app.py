@@ -1,7 +1,6 @@
 # ui/app.py
 #
 # Side-by-side Gradio UI: Baseline Agent (left) vs CCM Agent (right)
-# Mirrors the Arena AI layout shown in the design reference.
 #
 # Run from project root:
 #   python ui/app.py
@@ -13,7 +12,9 @@
 import sys
 import os
 import json
+import gc
 import time
+import shutil
 from pathlib import Path
 
 # ── Path setup ───────────────────────────────────────────────────
@@ -29,7 +30,59 @@ load_dotenv()
 
 import gradio as gr
 
-# ── Lazy agent imports (avoids heavy load on startup) ────────────
+CHROMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "chroma_db")
+MEMORY_PATH = "data/working_memory.json"
+
+# ── One-time reset (mirrors reset_all_storage from test.py) ──────
+
+def reset_all_storage():
+    """
+    Wipe ALL persisted state once at the start of a new conversation.
+    Mirrors reset_all_storage() in test.py exactly.
+    """
+    os.makedirs("data", exist_ok=True)
+
+    # Reset budget tool state
+    try:
+        from travel_agent.tools import reset_budget
+        reset_budget()
+    except Exception as exc:
+        print(f"[Reset] Budget reset warning: {exc}")
+
+    # Blank out working memory
+    blank = {
+        "facts": {"critical": [], "important": [], "contextual": []},
+        "decisions":  [],
+        "cancelled":  [],
+        "turn_count": 0,
+        "conversation_id": "",
+        "last_updated": "",
+    }
+    with open(MEMORY_PATH, "w") as f:
+        json.dump(blank, f, indent=2)
+
+    # Delete ChromaDB collections via a fresh client
+    if os.path.exists(CHROMA_PATH):
+        try:
+            import chromadb
+            client = chromadb.PersistentClient(path=CHROMA_PATH)
+            for col in client.list_collections():
+                try:
+                    name = col.name if hasattr(col, "name") else str(col)
+                    client.delete_collection(name)
+                    print(f"[Reset] Deleted collection: {name}")
+                except Exception as exc:
+                    print(f"[Reset] Could not delete collection: {exc}")
+            del client
+        except Exception as exc:
+            print(f"[Reset] ChromaDB client error: {exc}")
+
+    gc.collect()
+    time.sleep(0.5)
+    print("[Reset] Storage reset complete\n")
+
+
+# ── Lazy agent imports ────────────────────────────────────────────
 _baseline_agent = None
 _ccm_agent = None
 
@@ -37,73 +90,20 @@ _ccm_agent = None
 def get_agents():
     global _baseline_agent, _ccm_agent
     if _baseline_agent is None:
+        print("🤖 Initializing agents (this may take a minute on first run)...")
         from travel_agent.baseline_agent import BaselineAgent
         from travel_agent.agent import CCMAgent
+
+        print("📡 Loading Baseline Agent...")
         _baseline_agent = BaselineAgent()
+
+        print("🧠 Loading CCM Agent & ChromaDB...")
         _ccm_agent = CCMAgent(use_reranking=False)
+        print("✅ Agents ready!")
     return _baseline_agent, _ccm_agent
 
 
-# ── State helpers ────────────────────────────────────────────────
-
-def _fmt_memory(mem_state: dict) -> str:
-    """Format CCM memory state for display panel."""
-    lines = []
-
-    wm = mem_state.get("working_memory", "")
-    if wm and wm.strip() != "[NO USER PREFERENCES CAPTURED YET]":
-        lines.append("### 🧠 Working Memory")
-        lines.append("```")
-        lines.append(wm.strip())
-        lines.append("```")
-
-    ep = mem_state.get("episodic_entries", [])
-    if ep:
-        lines.append(f"\n### 📼 Episodic Memory ({len(ep)} entries)")
-        for e in ep[:4]:
-            txt = e.get("text", "")[:120]
-            lines.append(f"- {txt}…")
-
-    sem = mem_state.get("semantic_entries", [])
-    if sem:
-        lines.append(f"\n### 🗃️ Semantic Memory ({len(sem)} entries)")
-        for s in sem[:4]:
-            tool = s.get("tool_name", "tool")
-            txt = s.get("text", "")[:100]
-            lines.append(f"- **[{tool}]** {txt}…")
-
-    tok = mem_state.get("token_metrics", {})
-    if tok:
-        lines.append("\n### 📊 Token Metrics")
-        lines.append(f"- Baseline tokens: **{tok.get('baseline_tokens_used', 0):,}**")
-        lines.append(f"- CCM tokens: **{tok.get('ccm_tokens_used', 0):,}**")
-        ratio = tok.get('compression_ratio', 0)
-        saved = tok.get('tokens_saved', 0)
-        lines.append(f"- Compression ratio: **{ratio}x**")
-        lines.append(f"- Tokens saved: **{saved:,}**")
-
-    return "\n".join(lines) if lines else "_No memory captured yet._"
-
-
-def _build_metrics_table(baseline_history, ccm_history, b_tokens, c_tokens):
-    """Build a comparison metrics markdown table."""
-    rows = []
-    n = max(len(baseline_history), len(ccm_history))
-
-    for i in range(n):
-        b_tok = b_tokens[i] if i < len(b_tokens) else 0
-        c_tok = c_tokens[i] if i < len(c_tokens) else 0
-        ratio = f"{b_tok / max(c_tok, 1):.1f}x" if b_tok and c_tok else "—"
-        rows.append(f"| Turn {i+1} | {b_tok:,} | {c_tok:,} | {ratio} |")
-
-    if not rows:
-        return "_Send a message to see metrics._"
-
-    header = "| Turn | Baseline Tokens | CCM Tokens | Reduction |\n|------|----------------|------------|-----------|"
-    return header + "\n" + "\n".join(rows)
-
-
-# ── Core chat function ───────────────────────────────────────────
+# ── Core chat function ────────────────────────────────────────────
 
 def chat(
     user_message: str,
@@ -117,15 +117,21 @@ def chat(
         yield (
             baseline_history, ccm_history,
             b_token_log, c_token_log,
-            "", "",
-            _build_metrics_table(baseline_history, ccm_history, b_token_log, c_token_log),
             session_active,
         )
         return
 
     baseline_agent, ccm_agent = get_agents()
 
-    # --- NEW: Use dictionaries instead of lists ---
+    # ── One-time reset on first turn ─────────────────────────────
+    # If session_active is False, this is the first message.
+    # Reset all storage once before the agents process anything.
+    if not session_active:
+        print("[App] First turn detected — resetting all storage...")
+        reset_all_storage()
+        baseline_agent.reset()
+        ccm_agent.reset()
+
     baseline_history = baseline_history + [
         {"role": "user", "content": user_message},
         {"role": "assistant", "content": "⏳ _Thinking…_"}
@@ -135,68 +141,52 @@ def chat(
         {"role": "assistant", "content": "⏳ _Thinking…_"}
     ]
 
-
     yield (
         baseline_history, ccm_history,
         b_token_log, c_token_log,
-        "", "",
-        _build_metrics_table(baseline_history, ccm_history, b_token_log, c_token_log),
         session_active,
     )
 
     # ── Run Baseline ─────────────────────────────────────────────
-    # ... (Keep your agent logic as is) ...
     b_result = baseline_agent.chat(user_message)
     b_response = b_result["response"]
-    
-    # --- NEW: Update the last message content ---
     baseline_history[-1]["content"] = b_response
     b_token_log = b_token_log + [b_result["tokens_in_context"]]
 
     yield (
         baseline_history, ccm_history,
         b_token_log, c_token_log,
-        "", "",
-        _build_metrics_table(baseline_history, ccm_history, b_token_log, c_token_log),
         session_active,
     )
 
-    # ── Run CCM ───────────────────────────────────────────────────
-    # ... (Keep your agent logic as is) ...
+    # ── Run CCM ──────────────────────────────────────────────────
     c_result = ccm_agent.chat(user_message)
     c_response = c_result["response"]
-    
-    # --- NEW: Update the last message content ---
     ccm_history[-1]["content"] = c_response
     c_token_log = c_token_log + [c_result["tokens_in_context"]]
-    
-    mem_md = _fmt_memory(c_result.get("memory_state", {}))
-    metrics_md = _build_metrics_table(baseline_history, ccm_history, b_token_log, c_token_log)
 
     yield (
         baseline_history, ccm_history,
         b_token_log, c_token_log,
-        mem_md, metrics_md,
-        metrics_md,
-        True,
+        True,   # mark session as active after first turn completes
     )
 
 
 def reset_conversation():
-    """Reset both agents and all state."""
+    """Reset both agents and all state (manual reset button)."""
     try:
         baseline_agent, ccm_agent = get_agents()
+        reset_all_storage()
         baseline_agent.reset()
         ccm_agent.reset()
     except Exception:
         pass
-    return [], [], [], [], "", "_No memory captured yet._", "_Send a message to see metrics._", False
+    return [], [], [], [], False
 
 
-# ── CSS ──────────────────────────────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────
 
 CUSTOM_CSS = """
-/* ── Base & fonts ─────────────────────────────────────── */
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Sora:wght@300;400;600;700&display=swap');
 
 :root {
@@ -213,7 +203,6 @@ CUSTOM_CSS = """
     --accent-right:  #22d3a0;
     --accent-warn:   #f5a623;
     --accent-err:    #ef4444;
-    --tag-bg:        rgba(91,141,238,0.12);
     --radius:        12px;
     --radius-sm:     8px;
     --shadow:        0 4px 24px rgba(0,0,0,0.4);
@@ -227,7 +216,6 @@ body, .gradio-container {
     color: var(--text-primary) !important;
 }
 
-/* ── Header ───────────────────────────────────────────── */
 .ccm-header {
     text-align: center;
     padding: 28px 0 16px;
@@ -251,7 +239,6 @@ body, .gradio-container {
     font-weight: 300;
 }
 
-/* ── Column headers ───────────────────────────────────── */
 .col-header {
     display: flex;
     align-items: center;
@@ -282,7 +269,6 @@ body, .gradio-container {
     color: var(--text-secondary);
 }
 
-/* ── Chatbot ──────────────────────────────────────────── */
 .chatbot-left  { border-top: none !important; border-radius: 0 0 var(--radius) var(--radius) !important; }
 .chatbot-right { border-top: none !important; border-radius: 0 0 var(--radius) var(--radius) !important; }
 
@@ -308,7 +294,6 @@ body, .gradio-container {
     border-radius: var(--radius-sm) !important;
 }
 
-/* ── Input row ────────────────────────────────────────── */
 .input-row {
     background: var(--bg-card) !important;
     border: 1px solid var(--border) !important;
@@ -327,7 +312,6 @@ body, .gradio-container {
 .input-row textarea::placeholder { color: var(--text-muted) !important; }
 .input-row textarea:focus { outline: none !important; box-shadow: none !important; }
 
-/* ── Buttons ──────────────────────────────────────────── */
 .btn-send {
     background: linear-gradient(135deg, var(--accent-left), #7b6cff) !important;
     color: white !important;
@@ -358,137 +342,17 @@ body, .gradio-container {
     color: var(--accent-err) !important;
 }
 
-/* ── Tabs ─────────────────────────────────────────────── */
-.tabs-panel {
-    background: var(--bg-card) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: var(--radius) !important;
-    overflow: hidden !important;
-}
-
-.tab-nav button {
-    background: transparent !important;
-    color: var(--text-secondary) !important;
-    border: none !important;
-    border-bottom: 2px solid transparent !important;
-    font-family: 'Sora', sans-serif !important;
-    font-size: 0.82rem !important;
-    font-weight: 600 !important;
-    padding: 10px 18px !important;
-    transition: all 0.2s !important;
-}
-.tab-nav button:hover { color: var(--text-primary) !important; }
-.tab-nav button.selected {
-    color: var(--accent-right) !important;
-    border-bottom-color: var(--accent-right) !important;
-    background: rgba(34,211,160,0.06) !important;
-}
-
-/* ── Markdown panels ──────────────────────────────────── */
-.memory-panel, .metrics-panel {
-    background: transparent !important;
-    color: var(--text-primary) !important;
-    font-family: 'Sora', sans-serif !important;
-    font-size: 0.83rem !important;
-    line-height: 1.7 !important;
-    padding: 16px !important;
-}
-
-.memory-panel code, .metrics-panel code {
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.78rem !important;
-    background: var(--bg-input) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 4px !important;
-    padding: 2px 6px !important;
-    color: var(--accent-right) !important;
-}
-
-.memory-panel pre, .metrics-panel pre {
-    background: var(--bg-input) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: var(--radius-sm) !important;
-    padding: 12px !important;
-    overflow-x: auto !important;
-}
-
-.memory-panel table, .metrics-panel table {
-    width: 100% !important;
-    border-collapse: collapse !important;
-    font-size: 0.82rem !important;
-}
-.memory-panel th, .metrics-panel th {
-    background: var(--bg-input) !important;
-    color: var(--text-secondary) !important;
-    padding: 8px 12px !important;
-    text-align: left !important;
-    border-bottom: 1px solid var(--border) !important;
-    font-weight: 600 !important;
-    font-size: 0.78rem !important;
-    letter-spacing: 0.3px !important;
-}
-.memory-panel td, .metrics-panel td {
-    padding: 8px 12px !important;
-    border-bottom: 1px solid var(--border) !important;
-    color: var(--text-primary) !important;
-}
-.memory-panel tr:last-child td, .metrics-panel tr:last-child td {
-    border-bottom: none !important;
-}
-.memory-panel tr:hover td, .metrics-panel tr:hover td {
-    background: rgba(255,255,255,0.03) !important;
-}
-
-/* ── Token bars ───────────────────────────────────────── */
-.token-bar-wrap {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 4px 0;
-}
-.token-label {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-    min-width: 60px;
-}
-.token-bar {
-    height: 6px;
-    border-radius: 99px;
-    transition: width 0.5s ease;
-}
-.token-bar-b { background: var(--accent-left); }
-.token-bar-c { background: var(--accent-right); }
-
-/* ── Status pill ──────────────────────────────────────── */
-.status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    padding: 4px 0;
-}
-.status-dot {
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--text-muted);
-}
-.status-dot.active { background: var(--accent-right); box-shadow: 0 0 6px var(--accent-right); }
-
-/* ── Scrollbars ───────────────────────────────────────── */
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border-accent); border-radius: 99px; }
-
-/* ── Gradio overrides ─────────────────────────────────── */
 .gradio-container { max-width: 1400px !important; margin: 0 auto !important; }
 footer { display: none !important; }
 .gr-group { border: none !important; background: transparent !important; }
 label.svelte-1b6s6s { color: var(--text-secondary) !important; font-size: 0.78rem !important; }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-accent); border-radius: 99px; }
 """
 
-# ── HTML helpers ─────────────────────────────────────────────────
+# ── HTML helpers ──────────────────────────────────────────────────
 
 HEADER_HTML = """
 <div class="ccm-header">
@@ -498,7 +362,7 @@ HEADER_HTML = """
 """
 
 def col_header_html(label: str, model: str, side: str) -> str:
-    badge_cls = "badge-left" if side == "left" else "badge-right"
+    badge_cls  = "badge-left" if side == "left" else "badge-right"
     header_cls = f"col-header-{side}"
     return f"""
     <div class="col-header {header_cls}">
@@ -507,53 +371,51 @@ def col_header_html(label: str, model: str, side: str) -> str:
     </div>
     """
 
-BASELINE_HEADER = col_header_html("BASELINE", "llama-3.1-8b-instant · no compression", "left")
-CCM_HEADER = col_header_html("CCM", "llama-3.1-8b-instant · context compression module", "right")
+BASELINE_HEADER = col_header_html("BASELINE", "llama-3.3-70b · no compression", "left")
+CCM_HEADER      = col_header_html("CCM",      "llama-3.3-70b · context compression module", "right")
 
 
-# ── Build UI ─────────────────────────────────────────────────────
+# ── Build UI ──────────────────────────────────────────────────────
 
 def build_ui():
     with gr.Blocks(title="CCM Arena — Context Compression") as demo:
 
-        # ── Hidden state ─────────────────────────────────────────
+        # ── Hidden state ──────────────────────────────────────────
         baseline_history = gr.State([])
         ccm_history      = gr.State([])
         b_token_log      = gr.State([])
         c_token_log      = gr.State([])
         session_active   = gr.State(False)
 
-        # ── Header ───────────────────────────────────────────────
+        # ── Header ────────────────────────────────────────────────
         gr.HTML(HEADER_HTML)
 
-        # ── Main chat columns — SIDE BY SIDE ─────────────────────
+        # ── Main chat columns ─────────────────────────────────────
         with gr.Row():
 
-            # LEFT Column — Baseline
+            # LEFT — Baseline
             with gr.Column(scale=1):
                 gr.HTML(BASELINE_HEADER)
                 baseline_chat = gr.Chatbot(
-                label="",
-                height=480,
-                elem_classes=["chatbot-left"],
-                show_label=False,
-                # type="messages", # Use messages format
-                render_markdown=True,
-            )
+                    label="",
+                    height=480,
+                    elem_classes=["chatbot-left"],
+                    show_label=False,
+                    render_markdown=True,
+                )
 
-            # RIGHT Column — CCM
+            # RIGHT — CCM
             with gr.Column(scale=1):
                 gr.HTML(CCM_HEADER)
                 ccm_chat = gr.Chatbot(
-                label="",
-                height=480,
-                elem_classes=["chatbot-right"],
-                show_label=False,
-                # type="messages", # Use messages format
-                render_markdown=True,
-            )
+                    label="",
+                    height=480,
+                    elem_classes=["chatbot-right"],
+                    show_label=False,
+                    render_markdown=True,
+                )
 
-        # ── Input row ────────────────────────────────────────────
+        # ── Input row ─────────────────────────────────────────────
         with gr.Row():
             with gr.Column(scale=8):
                 user_input = gr.Textbox(
@@ -568,55 +430,6 @@ def build_ui():
                 send_btn = gr.Button("Send →", elem_classes=["btn-send"])
             with gr.Column(scale=1, min_width=100):
                 reset_btn = gr.Button("↺ Reset", elem_classes=["btn-reset"])
-
-        # ── Bottom panel — tabs ───────────────────────────────────
-        with gr.Row():
-            with gr.Column():
-                with gr.Tabs(elem_classes=["tabs-panel"]):
-                    with gr.Tab("🧠 CCM Memory State"):
-                        memory_panel = gr.Markdown(
-                            value="_No memory captured yet._",
-                            elem_classes=["memory-panel"],
-                        )
-                    with gr.Tab("📊 Token Comparison"):
-                        metrics_panel = gr.Markdown(
-                            value="_Send a message to see token metrics._",
-                            elem_classes=["metrics-panel"],
-                        )
-
-                    # Tab 3 — Quick Guide
-                    with gr.Tab("📖 How It Works"):
-                        gr.Markdown(
-                            """
-### Context Compression Module (CCM)
-
-The CCM sits between the user and the LLM. Instead of sending the full
-conversation history every turn, it maintains **three memory tiers**:
-
-| Tier | Storage | Access | Purpose |
-|------|---------|--------|---------|
-| **Working Memory** | JSON file on disk | Always injected | Critical facts (allergies, budget caps) — never forgotten |
-| **Episodic Memory** | ChromaDB vectors | Retrieved by similarity | Conversation summaries — what happened in past turns |
-| **Semantic Memory** | ChromaDB vectors | Retrieved by similarity | Compressed tool results — research archive |
-
-### Why this beats naive context stuffing
-
-| | Baseline | CCM |
-|---|---|---|
-| Turn 5 tokens | ~2,400 | ~800 |
-| Turn 15 tokens | ~7,800 → 💥 crash | ~1,400 ✅ |
-| Allergy remembered at turn 15 | ❌ Often forgotten | ✅ Always present |
-| Budget tracking | ❌ Lost in noise | ✅ Tracked in working memory |
-| Stale context (Bali→Switzerland) | ❌ Bleeds through | ✅ Marked stale & removed |
-
-### Try these test scenarios
-
-1. **Forgotten Allergy** — Start with *"I'm severely allergic to shellfish, budget $3000"*, chat for several turns, then ask *"find restaurants near Tsukiji"*
-2. **Budget Tracking** — Set a $2500 budget, "book" flights for $800 then hotels for $750, then ask for an Amalfi hotel
-3. **The Pivot** — Plan a Bali trip, then say *"scratch Bali, let's do Switzerland instead"*, then ask for a summary
-                            """,
-                            elem_classes=["memory-panel"],
-                        )
 
         # ── Suggested prompts ─────────────────────────────────────
         gr.HTML("""
@@ -643,8 +456,6 @@ conversation history every turn, it maintains **three memory tiers**:
         send_outputs = [
             baseline_chat, ccm_chat,
             b_token_log, c_token_log,
-            memory_panel, metrics_panel,
-            metrics_panel,
             session_active,
         ]
 
@@ -656,48 +467,31 @@ conversation history every turn, it maintains **three memory tiers**:
         ]
 
         def submit_and_clear(msg, bh, ch, bt, ct, sa):
-            results = None
             for step in chat(msg, bh, ch, bt, ct, sa):
-                results = step
                 yield step
-            # Clear input after done
-            if results:
-                final = list(results)
-                yield tuple(final)
 
-        # Textbox submit
         user_input.submit(
             fn=submit_and_clear,
             inputs=send_inputs,
             outputs=send_outputs,
-        ).then(
-            fn=lambda: "",
-            outputs=user_input,
-        )
+        ).then(fn=lambda: "", outputs=user_input)
 
-        # Button send
         send_btn.click(
             fn=submit_and_clear,
             inputs=send_inputs,
             outputs=send_outputs,
-        ).then(
-            fn=lambda: "",
-            outputs=user_input,
-        )
+        ).then(fn=lambda: "", outputs=user_input)
 
-        # Reset
         reset_btn.click(
             fn=reset_conversation,
             outputs=[
                 baseline_chat, ccm_chat,
                 b_token_log, c_token_log,
-                memory_panel, metrics_panel,
-                metrics_panel,
                 session_active,
             ],
         )
 
-        # Suggested prompt buttons — fill input
+        # Suggested prompt buttons
         p1.click(fn=lambda: "I'm planning a 5-day trip to Tokyo and Kyoto. Budget is $3,000 total. I am severely allergic to shellfish — this is a serious medical allergy.", outputs=user_input)
         p2.click(fn=lambda: "Find flights from New York to Tokyo in June", outputs=user_input)
         p3.click(fn=lambda: "What hotels are available in Shinjuku area Tokyo?", outputs=user_input)
@@ -708,7 +502,7 @@ conversation history every turn, it maintains **three memory tiers**:
     return demo
 
 
-# ── Entry point ──────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("\n" + "="*55)
@@ -731,24 +525,10 @@ if __name__ == "__main__":
         server_port=7860,
         share=False,
         show_error=True,
-        css=CUSTOM_CSS,  # Move it here
+        css=CUSTOM_CSS,
         theme=gr.themes.Base(
             primary_hue="blue",
             neutral_hue="slate",
             font=gr.themes.GoogleFont("Sora"),
-        ), # Move it here
+        ),
     )
-def get_agents():
-    global _baseline_agent, _ccm_agent
-    if _baseline_agent is None:
-        print("🤖 Initializing agents (this may take a minute on first run)...")
-        from travel_agent.baseline_agent import BaselineAgent
-        from travel_agent.agent import CCMAgent
-        
-        print("📡 Loading Baseline Agent...")
-        _baseline_agent = BaselineAgent()
-        
-        print("🧠 Loading CCM Agent & ChromaDB...")
-        _ccm_agent = CCMAgent(use_reranking=False)
-        print("✅ Agents ready!")
-    return _baseline_agent, _ccm_agent
