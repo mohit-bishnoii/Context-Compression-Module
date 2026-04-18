@@ -27,7 +27,7 @@ across 20+ turn conversations.
 
 ## How Memory Works
 
-![Tiered Memory Flow](images/tiered_memory_flow.png)
+![Tiered Memory Flow](images/memory.png)
 
 Three memory tiers feed the LLM — instead of dumping everything:
 
@@ -41,7 +41,7 @@ Three memory tiers feed the LLM — instead of dumping everything:
 
 ## How the Pipeline Works
 
-![CCM Director Pipeline](images/ccm_director_pipeline.png)
+![CCM Director Pipeline](images/pipeline.png)
 
 Every user message goes through 4 steps before the LLM sees it:
 
