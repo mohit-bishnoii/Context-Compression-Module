@@ -11,9 +11,9 @@
 
 ## Overview
 
-Modern AI agents break when conversations get long. They forget
-allergies, lose track of budgets, and recommend things the user
-already cancelled — not because the model is bad, but because the
+Modern AI agents break when conversations get long. They forget,
+lose track and recommend things the user already cancelled.
+— not because the model is bad, but because the
 context window fills up with noise.
 
 **This project builds a Context Compression Module (CCM)** that sits
