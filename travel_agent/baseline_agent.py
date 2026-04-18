@@ -2,18 +2,6 @@
 #
 # The DUMB agent — no compression whatsoever.
 # Stuffs the ENTIRE conversation history into every prompt.
-# Includes raw uncompressed tool results.
-#
-# PURPOSE:
-#   This is the BEFORE state.
-#   We run this first to PROVE the problem exists.
-#   Then we run CCMAgent to show the fix.
-#
-# WHAT WILL GO WRONG:
-#   Turn 1-5:   Works fine
-#   Turn 6-12:  Starts getting slow (more tokens each turn)
-#   Turn 13-16: May lose early constraints (allergy forgotten)
-#   Turn 17+:   Likely to hit 8K context limit and fail entirely
 
 import os
 import json
@@ -68,7 +56,7 @@ TOOL_DEFINITIONS = [
                     },
                     "budget_per_night": {
                         "type": "number",
-                        "description": "Max price per night"
+                        "description": "Max price per night (optional, omit if unknown)"
                     }
                 },
                 "required": ["location", "category"]
@@ -100,10 +88,7 @@ TOOL_DEFINITIONS = [
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": [
-                            "set_budget", "add_expense",
-                            "get_status", "reset"
-                        ]
+                        "enum": ["set_budget", "add_expense", "get_status", "reset"]
                     },
                     "amount": {"type": "number"},
                     "category": {"type": "string"},
@@ -129,100 +114,113 @@ def execute_tool(tool_name: str, tool_args: dict) -> str:
     try:
         if tool_name == "web_search":
             result = web_search(tool_args["query"])
+
         elif tool_name == "places_search":
+            # Coerce budget_per_night safely
+            raw_budget = tool_args.get("budget_per_night")
+            budget = None
+            if raw_budget is not None:
+                try:
+                    budget = float(raw_budget)
+                except (TypeError, ValueError):
+                    budget = None
             result = places_search(
                 location=tool_args["location"],
                 category=tool_args.get("category", "hotels"),
-                budget_per_night=tool_args.get("budget_per_night")
+                budget_per_night=budget,
             )
+
         elif tool_name == "weather_fetch":
             result = weather_fetch(
                 city=tool_args["city"],
-                travel_dates=tool_args.get(
-                    "travel_dates", "upcoming trip"
-                )
+                travel_dates=tool_args.get("travel_dates", "upcoming trip"),
             )
+
         elif tool_name == "budget_tracker":
+            raw_amount = tool_args.get("amount", 0)
+            raw_total  = tool_args.get("total_budget", 0)
+            try:
+                amount = float(raw_amount) if raw_amount else 0
+            except (TypeError, ValueError):
+                amount = 0
+            try:
+                total_budget = float(raw_total) if raw_total else 0
+            except (TypeError, ValueError):
+                total_budget = 0
             result = budget_tracker(
                 action=tool_args["action"],
-                amount=tool_args.get("amount", 0),
+                amount=amount,
                 category=tool_args.get("category", "general"),
-                total_budget=tool_args.get("total_budget", 0)
+                total_budget=total_budget,
             )
+
         else:
             result = {"error": f"Unknown tool: {tool_name}"}
 
-        # Return FULL uncompressed JSON — this is intentional
-        # This is what causes context overflow in baseline
         return json.dumps(result, indent=2)
 
     except Exception as e:
         return json.dumps({"error": str(e)})
 
 
+BASELINE_TOOL_INSTRUCTION = """
+
+IMPORTANT TOOL USAGE RULES:
+- You MUST call tools to answer the user's question.
+- User asks about flights → call web_search
+- User asks about hotels → call places_search with category="hotels"
+- User asks about restaurants → call places_search with category="restaurants"
+- User asks about attractions → call places_search with category="attractions"
+- User asks about weather → call weather_fetch
+- User mentions a budget → call budget_tracker with action="set_budget"
+- For places_search: NEVER pass budget_per_night as null or a string. Only include it if you have an explicit numeric value, otherwise omit it entirely.
+"""
+
+
 class BaselineAgent:
     """
     Baseline travel agent with NO context compression.
-
-    Every turn:
-    - Full conversation history sent to LLM
-    - Raw uncompressed tool results added to history
-    - No memory extraction
-    - No stale context detection
-    - No RAG retrieval
-
-    This agent WILL fail on long conversations.
-    That failure is the proof that CCM is needed.
+    Every turn: full conversation history sent to LLM.
+    Raw uncompressed tool results added to history.
     """
 
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "llama-3.1-8b-instant"
-        self.conversation_history = []
-        self.token_counts_per_turn = []
-        self.total_tool_calls = 0
+        self.model  = "llama-3.3-70b-versatile"
+        self.conversation_history   = []
+        self.token_counts_per_turn  = []
+        self.total_tool_calls       = 0
 
     def reset(self):
-        """Reset for new conversation."""
-        self.conversation_history = []
-        self.token_counts_per_turn = []
-        self.total_tool_calls = 0
+        self.conversation_history   = []
+        self.token_counts_per_turn  = []
+        self.total_tool_calls       = 0
         reset_budget()
         print("[Baseline] Reset complete")
 
     def _count_context_tokens(self) -> int:
-        """Count total tokens in current full history."""
         total = count_tokens(BASELINE_SYSTEM_PROMPT)
         for msg in self.conversation_history:
             content = msg.get("content", "")
             if content:
                 total += count_tokens(str(content))
-            # Count tool calls if present
             if "tool_calls" in msg:
                 total += count_tokens(str(msg["tool_calls"]))
         return total
 
     def chat(self, user_message: str) -> dict:
-        """
-        Send message, get response.
-        NO compression — full history every time.
-
-        Returns same format as CCMAgent for easy comparison.
-        """
-        # Add to full history
         self.conversation_history.append({
             "role": "user",
-            "content": user_message
+            "content": user_message,
         })
 
-        # Build messages — FULL HISTORY every turn
-        # This grows unboundedly — the core problem
+        system_content = BASELINE_SYSTEM_PROMPT + BASELINE_TOOL_INSTRUCTION
+
         messages = [
-            {"role": "system", "content": BASELINE_SYSTEM_PROMPT}
+            {"role": "system", "content": system_content}
         ] + self.conversation_history
 
-        tokens_before = self._count_context_tokens()
-        response_text = ""
+        response_text        = ""
         tool_calls_this_turn = []
 
         try:
@@ -232,12 +230,12 @@ class BaselineAgent:
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
                 max_tokens=1024,
-                temperature=0.0
+                temperature=0.0,
+                parallel_tool_calls=False,
             )
 
-            # Handle tool calls
             max_rounds = 5
-            rounds = 0
+            rounds     = 0
 
             while (
                 response.choices[0].finish_reason == "tool_calls"
@@ -246,19 +244,16 @@ class BaselineAgent:
                 rounds += 1
                 tool_calls = response.choices[0].message.tool_calls
 
-                # Add assistant tool call message to history
                 assistant_msg = {
                     "role": "assistant",
-                    "content": (
-                        response.choices[0].message.content or ""
-                    ),
+                    "content": response.choices[0].message.content or "",
                     "tool_calls": [
                         {
                             "id": tc.id,
                             "type": "function",
                             "function": {
                                 "name": tc.function.name,
-                                "arguments": tc.function.arguments
+                                "arguments": tc.function.arguments,
                             }
                         }
                         for tc in tool_calls
@@ -266,41 +261,30 @@ class BaselineAgent:
                 }
                 self.conversation_history.append(assistant_msg)
 
-                # Execute tools and add RAW results to history
                 for tool_call in tool_calls:
                     tool_name = tool_call.function.name
-                    tool_args = json.loads(
-                        tool_call.function.arguments
-                    )
+                    try:
+                        tool_args = json.loads(tool_call.function.arguments)
+                    except Exception:
+                        tool_args = {}
 
-                    print(
-                        f"  [Baseline] Tool: {tool_name}"
-                    )
-
-                    # RAW result — no compression
+                    print(f"  [Baseline] Tool: {tool_name}")
                     raw_result = execute_tool(tool_name, tool_args)
                     self.total_tool_calls += 1
 
-                    raw_tokens = count_tokens(raw_result)
                     tool_calls_this_turn.append({
                         "tool": tool_name,
-                        "raw_result_tokens": raw_tokens
+                        "raw_result_tokens": count_tokens(raw_result),
                     })
 
-                    # Add FULL raw result to history
-                    # This is what causes overflow
                     self.conversation_history.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": raw_result
+                        "content": raw_result,
                     })
 
-                # Rebuild full messages and call again
                 messages = [
-                    {
-                        "role": "system",
-                        "content": BASELINE_SYSTEM_PROMPT
-                    }
+                    {"role": "system", "content": system_content}
                 ] + self.conversation_history
 
                 response = self.client.chat.completions.create(
@@ -309,33 +293,29 @@ class BaselineAgent:
                     tools=TOOL_DEFINITIONS,
                     tool_choice="auto",
                     max_tokens=1024,
-                    temperature=0.0
+                    temperature=0.0,
+                    parallel_tool_calls=False,
                 )
 
-            response_text = (
-                response.choices[0].message.content or ""
-            )
+            response_text = response.choices[0].message.content or ""
 
         except Exception as e:
             error_msg = str(e)
-            response_text = f"Error: {error_msg}"
-
-            # Context overflow shows up as this error
-            if "413" in error_msg or "too large" in error_msg.lower():
+            if "413" in error_msg or "too large" in error_msg.lower() or "rate_limit" in error_msg.lower():
                 response_text = (
                     "CONTEXT OVERFLOW ERROR: "
                     "Too much history for the model to process. "
                     "This is the failure that CCM prevents."
                 )
+            else:
+                response_text = f"Error: {error_msg}"
             print(f"[Baseline] Error: {e}")
 
-        # Add response to history
         self.conversation_history.append({
             "role": "assistant",
-            "content": response_text
+            "content": response_text,
         })
 
-        # Count tokens AFTER (includes response)
         tokens_after = self._count_context_tokens()
         self.token_counts_per_turn.append(tokens_after)
 
@@ -344,7 +324,7 @@ class BaselineAgent:
             "tokens_in_context": tokens_after,
             "tool_calls": tool_calls_this_turn,
             "turn_number": len(self.token_counts_per_turn),
-            "agent_type": "baseline"
+            "agent_type": "baseline",
         }
 
     def get_metrics(self) -> dict:
@@ -353,13 +333,11 @@ class BaselineAgent:
             "total_turns": len(self.token_counts_per_turn),
             "token_counts_per_turn": self.token_counts_per_turn,
             "max_tokens_used": (
-                max(self.token_counts_per_turn)
-                if self.token_counts_per_turn else 0
+                max(self.token_counts_per_turn) if self.token_counts_per_turn else 0
             ),
             "avg_tokens_per_turn": (
-                sum(self.token_counts_per_turn) //
-                len(self.token_counts_per_turn)
+                sum(self.token_counts_per_turn) // len(self.token_counts_per_turn)
                 if self.token_counts_per_turn else 0
             ),
-            "total_tool_calls": self.total_tool_calls
+            "total_tool_calls": self.total_tool_calls,
         }
