@@ -1,12 +1,77 @@
 {
   "facts": {
-    "critical": [],
+    "critical": [
+      {
+        "key": "allergy_shellfish",
+        "value": "severely allergic to shellfish \u2014 this is a serious medical allergy",
+        "category": "constraint",
+        "priority": "critical",
+        "added_at_turn": 6
+      }
+    ],
     "important": [],
-    "contextual": []
+    "contextual": [
+      {
+        "key": "travel_destination_primary",
+        "value": "Tokyo",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 1
+      },
+      {
+        "key": "travel_origin_primary",
+        "value": "New York",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 1
+      },
+      {
+        "key": "travel_month_primary",
+        "value": "June",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 1
+      },
+      {
+        "key": "dietary_requirement_shellfish",
+        "value": "None mentioned",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 2
+      },
+      {
+        "key": "budget_maximum",
+        "value": "$3,000",
+        "category": "constraint",
+        "priority": "contextual",
+        "added_at_turn": 2
+      },
+      {
+        "key": "medical_condition_affecting_travel",
+        "value": "None mentioned",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 2
+      },
+      {
+        "key": "safety_requirement",
+        "value": "None mentioned",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 2
+      },
+      {
+        "key": "trip_duration",
+        "value": "5-day trip",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 7
+      }
+    ]
   },
   "decisions": [],
   "cancelled": [],
-  "turn_count": 0,
+  "turn_count": 9,
   "conversation_id": "",
-  "last_updated": ""
+  "last_updated": "2026-04-19T00:28:43.587709"
 }

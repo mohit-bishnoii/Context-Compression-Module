@@ -125,9 +125,16 @@ def chat(
 
     baseline_agent, ccm_agent = get_agents()
 
-    # Append user message to both histories immediately
-    baseline_history = baseline_history + [[user_message, "⏳ _Thinking…_"]]
-    ccm_history = ccm_history + [[user_message, "⏳ _Thinking…_"]]
+    # --- NEW: Use dictionaries instead of lists ---
+    baseline_history = baseline_history + [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": "⏳ _Thinking…_"}
+    ]
+    ccm_history = ccm_history + [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": "⏳ _Thinking…_"}
+    ]
+
 
     yield (
         baseline_history, ccm_history,
@@ -138,17 +145,13 @@ def chat(
     )
 
     # ── Run Baseline ─────────────────────────────────────────────
-    b_response = "Error"
-    b_tokens = 0
-    try:
-        b_result = baseline_agent.chat(user_message)
-        b_response = b_result["response"]
-        b_tokens = b_result["tokens_in_context"]
-    except Exception as e:
-        b_response = f"❌ Error: {str(e)[:200]}"
-
-    baseline_history[-1][1] = b_response
-    b_token_log = b_token_log + [b_tokens]
+    # ... (Keep your agent logic as is) ...
+    b_result = baseline_agent.chat(user_message)
+    b_response = b_result["response"]
+    
+    # --- NEW: Update the last message content ---
+    baseline_history[-1]["content"] = b_response
+    b_token_log = b_token_log + [b_result["tokens_in_context"]]
 
     yield (
         baseline_history, ccm_history,
@@ -159,20 +162,15 @@ def chat(
     )
 
     # ── Run CCM ───────────────────────────────────────────────────
-    c_response = "Error"
-    c_tokens = 0
-    mem_md = ""
-    try:
-        c_result = ccm_agent.chat(user_message)
-        c_response = c_result["response"]
-        c_tokens = c_result["tokens_in_context"]
-        mem_md = _fmt_memory(c_result.get("memory_state", {}))
-    except Exception as e:
-        c_response = f"❌ Error: {str(e)[:200]}"
-
-    ccm_history[-1][1] = c_response
-    c_token_log = c_token_log + [c_tokens]
-
+    # ... (Keep your agent logic as is) ...
+    c_result = ccm_agent.chat(user_message)
+    c_response = c_result["response"]
+    
+    # --- NEW: Update the last message content ---
+    ccm_history[-1]["content"] = c_response
+    c_token_log = c_token_log + [c_result["tokens_in_context"]]
+    
+    mem_md = _fmt_memory(c_result.get("memory_state", {}))
     metrics_md = _build_metrics_table(baseline_history, ccm_history, b_token_log, c_token_log)
 
     yield (
@@ -528,23 +526,22 @@ def build_ui():
         # ── Header ───────────────────────────────────────────────
         gr.HTML(HEADER_HTML)
 
-        # ── Main chat columns ────────────────────────────────────
-        with gr.Row(equal_height=True):
+        # ── Main chat columns — SIDE BY SIDE ─────────────────────
+        with gr.Row():
 
-            # LEFT — Baseline
+            # LEFT Column — Baseline
             with gr.Column(scale=1):
                 gr.HTML(BASELINE_HEADER)
-            baseline_chat = gr.Chatbot(
+                baseline_chat = gr.Chatbot(
                 label="",
                 height=480,
                 elem_classes=["chatbot-left"],
                 show_label=False,
-                type="tuples",  # <--- ADD THIS LINE
-                avatar_images=(None, None),
+                # type="messages", # Use messages format
                 render_markdown=True,
             )
 
-            # RIGHT — CCM
+            # RIGHT Column — CCM
             with gr.Column(scale=1):
                 gr.HTML(CCM_HEADER)
                 ccm_chat = gr.Chatbot(
@@ -552,8 +549,7 @@ def build_ui():
                 height=480,
                 elem_classes=["chatbot-right"],
                 show_label=False,
-                type="tuples",  # <--- ADD THIS LINE
-                avatar_images=(None, None),
+                # type="messages", # Use messages format
                 render_markdown=True,
             )
 
@@ -561,7 +557,7 @@ def build_ui():
         with gr.Row():
             with gr.Column(scale=8):
                 user_input = gr.Textbox(
-                    placeholder="Ask your travel agent anything… (e.g. 'I'm planning Tokyo, budget $3000, I'm allergic to shellfish')",
+                    placeholder="Ask your travel agent anything…",
                     lines=1,
                     max_lines=3,
                     show_label=False,
@@ -577,15 +573,11 @@ def build_ui():
         with gr.Row():
             with gr.Column():
                 with gr.Tabs(elem_classes=["tabs-panel"]):
-
-                    # Tab 1 — CCM Memory State
                     with gr.Tab("🧠 CCM Memory State"):
                         memory_panel = gr.Markdown(
-                            value="_No memory captured yet. Start a conversation._",
+                            value="_No memory captured yet._",
                             elem_classes=["memory-panel"],
                         )
-
-                    # Tab 2 — Token Comparison
                     with gr.Tab("📊 Token Comparison"):
                         metrics_panel = gr.Markdown(
                             value="_Send a message to see token metrics._",
