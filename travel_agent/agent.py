@@ -155,6 +155,106 @@ def count_tokens(text: str) -> int:
         return len(text) // 4
 
 
+def _format_result_for_llm(tool_name: str, raw_result: dict) -> str:
+    """
+    Format a raw tool result into a readable string for the LLM.
+
+    This is intentionally richer than the compressed version stored in
+    SemanticMemory — the LLM needs specific names/details to give useful
+    responses, while memory only needs a compact summary for retrieval.
+    """
+    try:
+        if tool_name == "places_search":
+            results = raw_result.get("results", [])
+            if not results:
+                msg = raw_result.get("message", "No results found.")
+                return f"places_search: {msg}"
+            lines = []
+            for r in results[:5]:
+                name    = r.get("name") or "Unknown"
+                addr    = r.get("address") or r.get("formatted") or ""
+                price   = r.get("price_per_night") or r.get("price_range") or ""
+                rating  = r.get("rating") or ""
+                warning = r.get("allergy_warning") or ""
+                line    = f"- {name}"
+                if addr:
+                    line += f", {addr}"
+                if price:
+                    line += f" (${price}/night)"
+                if rating:
+                    line += f" ★{rating}"
+                if warning:
+                    line += f" | ⚠️ {warning}"
+                lines.append(line)
+            source = raw_result.get("data_source", "")
+            header = f"Places results ({source}):"
+            return header + "\n" + "\n".join(lines)
+
+        elif tool_name == "web_search":
+            results = raw_result.get("results", [])
+            if not results:
+                msg = raw_result.get("message", "No results found.")
+                return f"web_search: {msg}"
+            lines = []
+            for r in results[:5]:
+                title   = r.get("title") or r.get("airline") or ""
+                snippet = r.get("snippet") or ""
+                price   = r.get("price") or ""
+                line = f"- {title}"
+                if price:
+                    line += f": {price}"
+                if snippet:
+                    line += f" — {snippet}"
+                lines.append(line)
+            source = raw_result.get("data_source", "")
+            stype  = raw_result.get("search_type", "")
+            header = f"Search results [{stype}] ({source}):"
+            return header + "\n" + "\n".join(lines)
+
+        elif tool_name == "weather_fetch":
+            city  = raw_result.get("city", "")
+            cond  = raw_result.get("current_conditions", {})
+            temp  = cond.get("temperature_f", "?")
+            desc  = cond.get("description", "")
+            humid = cond.get("humidity_percent", "")
+            wind  = cond.get("wind_mph", "")
+            note  = raw_result.get("seasonal_note", "")
+            packing = raw_result.get("packing_recommendations", [])
+            activities = raw_result.get("recommended_activities", [])
+            lines = [f"Weather in {city}: {temp}°F, {desc}"]
+            if humid:
+                lines.append(f"Humidity: {humid}%  Wind: {wind} mph")
+            if note:
+                lines.append(f"Seasonal note: {note}")
+            if packing:
+                lines.append(f"Pack: {', '.join(packing[:6])}")
+            if activities:
+                lines.append(f"Good for: {', '.join(activities)}")
+            return "\n".join(lines)
+
+        elif tool_name == "budget_tracker":
+            status    = raw_result.get("status", "")
+            total     = raw_result.get("total_budget", "")
+            spent     = raw_result.get("total_spent", raw_result.get("amount_spent", ""))
+            remaining = raw_result.get("remaining", "")
+            warning   = raw_result.get("warning", "")
+            lines = [f"Budget: {status}"]
+            if total != "":
+                lines.append(
+                    f"Total: ${total}  |  Spent: ${spent}  |  Remaining: ${remaining}"
+                )
+            if warning:
+                lines.append(warning)
+            return "\n".join(lines)
+
+        else:
+            raw_str = json.dumps(raw_result, indent=2)
+            return raw_str[:600] + ("…" if len(raw_str) > 600 else "")
+
+    except Exception:
+        return str(raw_result)[:400]
+
+
 def execute_tool(tool_name: str, tool_args: dict) -> tuple:
     """
     Execute a tool and return (raw_result, query_used).
@@ -509,12 +609,18 @@ class CCMAgent:
                         "query": query_used
                     })
 
-                    # Add COMPRESSED result to messages
-                    # (baseline adds raw result — much larger)
+                    # Add a READABLE result to messages for the LLM.
+                    # The compressed version is already stored in SemanticMemory
+                    # by process_tool_result() above — that's for long-term
+                    # retrieval. Here we give the LLM enough detail to actually
+                    # mention specific names, prices, etc. in its response.
+                    llm_tool_content = _format_result_for_llm(
+                        tool_name, raw_result
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": compressed_result
+                        "content": llm_tool_content
                     })
 
                 # Call LLM again with compressed tool results

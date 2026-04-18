@@ -131,7 +131,7 @@ COMPRESSION_PROMPT = """You are the tool result compression component of a conte
 
 YOUR ROLE:
 A tool was called and returned a large result.
-Compress it into a brief, high-signal summary (maximum 100 words).
+Compress it into a brief, high-signal summary (maximum 150 words).
 Discard everything that does not affect decisions.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -170,7 +170,7 @@ OUTPUT REQUIREMENTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Tool type: {tool_type}
-Maximum output: 100 words
+Maximum output: 150 words
 Format: Plain text only. No markdown. No bold. No asterisks.
         Use simple dash (-) for lists only.
 Numbers: Always preserve exact numbers.

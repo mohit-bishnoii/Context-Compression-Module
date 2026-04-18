@@ -1,12 +1,27 @@
 {
   "facts": {
-    "critical": [],
+    "critical": [
+      {
+        "key": "budget_maximum",
+        "value": "maximum total trip budget is $3000",
+        "category": "constraint",
+        "priority": "critical",
+        "added_at_turn": 2
+      },
+      {
+        "key": "allergy_shellfish",
+        "value": "severely allergic to shellfish \u2014 medical requirement",
+        "category": "constraint",
+        "priority": "critical",
+        "added_at_turn": 3
+      }
+    ],
     "important": [],
     "contextual": []
   },
   "decisions": [],
   "cancelled": [],
-  "turn_count": 3,
+  "turn_count": 5,
   "conversation_id": "",
-  "last_updated": "2026-04-19T00:29:18.809350"
+  "last_updated": "2026-04-19T03:02:30.586474"
 }

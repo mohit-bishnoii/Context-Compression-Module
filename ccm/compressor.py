@@ -96,13 +96,13 @@ class ToolCompressor:
                             "You compress tool results into brief plain-text summaries. "
                             "No markdown. No bold. No asterisks. No headers. "
                             "Use plain sentences or simple dashes for lists only. "
-                            "Preserve all numbers exactly. Maximum 100 words. "
+                            "Preserve all numbers exactly. Maximum 150 words. "
                             "Flag any constraint conflicts with ⚠️."
                         ),
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=250,
+                max_tokens=375,
                 temperature=0.0,
             )
 
