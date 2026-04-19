@@ -1,35 +1,12 @@
 {
   "facts": {
     "critical": [],
-    "important": [
-      {
-        "key": "budget_maximum",
-        "value": "around 2000 dollars",
-        "category": "constraint",
-        "priority": "important",
-        "added_at_turn": 4
-      }
-    ],
-    "contextual": [
-      {
-        "key": "destination_primary",
-        "value": "China",
-        "category": "information",
-        "priority": "contextual",
-        "added_at_turn": 3
-      },
-      {
-        "key": "destination_secondary",
-        "value": "China",
-        "category": "information",
-        "priority": "contextual",
-        "added_at_turn": 3
-      }
-    ]
+    "important": [],
+    "contextual": []
   },
   "decisions": [],
   "cancelled": [],
-  "turn_count": 4,
+  "turn_count": 0,
   "conversation_id": "",
-  "last_updated": "2026-04-19T04:12:59.367289"
+  "last_updated": ""
 }

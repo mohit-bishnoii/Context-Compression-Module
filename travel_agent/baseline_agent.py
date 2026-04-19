@@ -68,7 +68,11 @@ TOOL_DEFINITIONS = [
                     },
                     "budget_per_night": {
                         "type": "number",
-                        "description": "Max price per night"
+                        "description": (
+                            "Max price per night — for hotels ONLY. "
+                            "Do NOT include this parameter when searching "
+                            "restaurants or attractions."
+                        )
                     }
                 },
                 "required": ["location", "category"]
@@ -177,7 +181,7 @@ class BaselineAgent:
 
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "llama-3.1-8b-instant"
+        self.model = "llama-3.3-70b-versatile"
         self.conversation_history = []
         self.token_counts_per_turn = []
         self.total_tool_calls = 0
@@ -273,6 +277,12 @@ class BaselineAgent:
                     tool_args = json.loads(
                         tool_call.function.arguments
                     )
+                    # Strip null values — Groq rejects tool calls where an
+                    # optional numeric field (e.g. budget_per_night) is null.
+                    tool_args = {
+                        k: v for k, v in tool_args.items()
+                        if v is not None
+                    }
 
                     print(
                         f"  [Baseline] Tool: {tool_name}"

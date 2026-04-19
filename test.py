@@ -10,7 +10,7 @@
 #      so that ./data/chroma_db paths resolve correctly.
 #
 # RATE LIMITS:
-#   Groq free tier = 30 requests/minute on llama-3.1-8b-instant.
+#   Groq free tier = 30 requests/minute on llama-3.3-70b-versatile.
 #   Each test turn makes 3–5 API calls (extractor, stale detector,
 #   agent, compressor). We add sleeps to stay safe.
 #   If you hit a 429 error, increase INTER_TURN_SLEEP below.
