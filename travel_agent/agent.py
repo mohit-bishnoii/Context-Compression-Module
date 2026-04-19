@@ -453,7 +453,7 @@ class CCMAgent:
 
     def __init__(self, use_reranking: bool = True):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "llama-3.3-70b-versatile"
+        self.model = "llama-3.1-8b-instant"
 
         # The CCM handles all memory
         self.ccm = ContextCompressionModule(

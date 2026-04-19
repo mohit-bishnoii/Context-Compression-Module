@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Travel Agent - Context Compression Module</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        
+        .sidebar {
+            width: 300px;
+            background: #16213e;
+            border-right: 1px solid #0f3460;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .sidebar h2 {
+            padding: 15px;
+            background: #0f3460;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+        
+        .memory-section {
+            border-bottom: 1px solid #0f3460;
+            flex: 1;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .memory-section h3 {
+            padding: 10px 15px;
+            background: #1a1a2e;
+            font-size: 12px;
+            color: #00d9ff;
+            border-bottom: 1px solid #0f3460;
+        }
+        
+        .memory-content {
+            padding: 10px;
+            overflow-y: auto;
+            font-size: 11px;
+            line-height: 1.5;
+            flex: 1;
+        }
+        
+        .memory-content ul {
+            list-style: none;
+        }
+        
+        .memory-content li {
+            margin-bottom: 8px;
+            padding: 6px;
+            background: #0f3460;
+            border-radius: 4px;
+        }
+        
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .header {
+            padding: 15px 20px;
+            background: #0f3460;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .token-display {
+            background: #00d9ff;
+            color: #1a1a2e;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        
+        .chat-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .message {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            line-height: 1.5;
+        }
+        
+        .message.user {
+            align-self: flex-end;
+            background: #0f3460;
+        }
+        
+        .message.assistant {
+            align-self: flex-start;
+            background: #16213e;
+        }
+        
+        .message .timestamp {
+            font-size: 10px;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .input-area {
+            padding: 15px;
+            background: #16213e;
+            border-top: 1px solid #0f3460;
+            display: flex;
+            gap: 10px;
+        }
+        
+        .input-area input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            background: #1a1a2e;
+            color: #eee;
+            font-size: 14px;
+        }
+        
+        .input-area button {
+            padding: 12px 24px;
+            background: #00d9ff;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 8px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        
+        .input-area button:hover {
+            background: #00a8cc;
+        }
+        
+        .input-area button.reset-btn {
+            background: #e74c3c;
+            color: white;
+        }
+        
+        .input-area button.reset-btn:hover {
+            background: #c0392b;
+        }
+        
+        .logs-area {
+            height: 200px;
+            background: #0a0a15;
+            border-top: 1px solid #0f3460;
+            overflow-y: auto;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+        }
+        
+        .logs-area .log-entry {
+            margin-bottom: 4px;
+            color: #00d9ff;
+        }
+        
+        .stats {
+            display: flex;
+            gap: 20px;
+            padding: 10px 15px;
+            background: #0a0a15;
+            font-size: 12px;
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-item .value {
+            font-size: 18px;
+            color: #00d9ff;
+            font-weight: bold;
+        }
+        
+        .stat-item .label {
+            color: #666;
+            font-size: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="value">{{ memory_state.turn_count }}</div>
+                    <div class="label">Turns</div>
+                </div>
+                <div class="stat-item">
+                    <div class="value">{{ memory_state.token_metrics.compression_ratio }}</div>
+                    <div class="label">Compression</div>
+                </div>
+            </div>
+            
+            <div class="memory-section">
+                <h3>Working Memory</h3>
+                <div class="memory-content">
+                    {% if memory_state.working_memory %}
+                    <div>{{ memory_state.working_memory }}</div>
+                    {% else %}
+                    <p>No working memory yet.</p>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <div class="memory-section">
+                <h3>Episodic Memory ({{ memory_state.episodic_count }} entries)</h3>
+                <div class="memory-content">
+                    {% if memory_state.episodic_entries %}
+                    <ul>
+                    {% for entry in memory_state.episodic_entries %}
+                        <li>{{ entry.text[:150] }}...</li>
+                    {% endfor %}
+                    </ul>
+                    {% else %}
+                    <p>No episodic memories yet.</p>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <div class="memory-section">
+                <h3>Semantic Memory ({{ memory_state.semantic_count }} entries)</h3>
+                <div class="memory-content">
+                    {% if memory_state.semantic_entries %}
+                    <ul>
+                    {% for entry in memory_state.semantic_entries %}
+                        <li>{{ entry.text[:150] }}...</li>
+                    {% endfor %}
+                    </ul>
+                    {% else %}
+                    <p>No semantic memories yet.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <div class="header">
+                <h1>Travel Agent</h1>
+                <div class="token-display">Tokens: {{ token_amount }}</div>
+            </div>
+            
+            <div class="chat-area" id="chatArea">
+                {% for msg in conversation %}
+                <div class="message {{ msg.role }}">
+                    <div>{{ msg.content }}</div>
+                    <div class="timestamp">{{ msg.timestamp }}</div>
+                </div>
+                {% endfor %}
+            </div>
+            
+            <div class="input-area">
+                <form id="chatForm" style="display: flex; gap: 10px; flex: 1;">
+                    <input type="text" name="message" placeholder="Type your message..." autofocus>
+                    <button type="submit">Send</button>
+                </form>
+                <button class="reset-btn" onclick="resetChat()">Reset</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="logs-area">
+        <h3>Logs</h3>
+        {% for log in logs %}
+        <div class="log-entry">{{ log }}</div>
+        {% endfor %}
+    </div>
+    
+    <script>
+        const chatForm = document.getElementById('chatForm');
+        const chatArea = document.getElementById('chatArea');
+        
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(chatForm);
+            const message = formData.get('message');
+            
+            if (!message) return;
+            
+            const response = await fetch('/chat', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            
+            if (result.status === 'ok') {
+                chatForm.reset();
+                location.reload();
+            }
+        });
+        
+        async function resetChat() {
+            await fetch('/reset', { method: 'POST' });
+            location.reload();
+        }
+    </script>
+</body>
+</html>

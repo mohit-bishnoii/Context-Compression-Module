@@ -177,7 +177,7 @@ class BaselineAgent:
 
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "llama-3.3-70b-versatile"
+        self.model = "llama-3.1-8b-instant"
         self.conversation_history = []
         self.token_counts_per_turn = []
         self.total_tool_calls = 0

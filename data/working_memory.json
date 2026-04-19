@@ -1,27 +1,35 @@
 {
   "facts": {
-    "critical": [
+    "critical": [],
+    "important": [
       {
         "key": "budget_maximum",
-        "value": "maximum total trip budget is $3000",
+        "value": "around 2000 dollars",
         "category": "constraint",
-        "priority": "critical",
-        "added_at_turn": 2
-      },
-      {
-        "key": "allergy_shellfish",
-        "value": "severely allergic to shellfish \u2014 medical requirement",
-        "category": "constraint",
-        "priority": "critical",
-        "added_at_turn": 3
+        "priority": "important",
+        "added_at_turn": 4
       }
     ],
-    "important": [],
-    "contextual": []
+    "contextual": [
+      {
+        "key": "destination_primary",
+        "value": "China",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 3
+      },
+      {
+        "key": "destination_secondary",
+        "value": "China",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 3
+      }
+    ]
   },
   "decisions": [],
   "cancelled": [],
-  "turn_count": 5,
+  "turn_count": 4,
   "conversation_id": "",
-  "last_updated": "2026-04-19T03:02:30.586474"
+  "last_updated": "2026-04-19T04:12:59.367289"
 }

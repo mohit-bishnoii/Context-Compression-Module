@@ -9,3 +9,6 @@ pydantic==2.8.2
 requests==2.32.3
 googlemaps==4.10.0
 serpapi==1.0.2
+fastapi==0.115.0
+uvicorn==0.30.6
+jinja2==3.1.4

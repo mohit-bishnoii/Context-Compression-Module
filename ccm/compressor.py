@@ -43,7 +43,7 @@ class ToolCompressor:
 
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model  = "llama-3.3-70b-versatile"
+        self.model  = "llama-3.1-8b-instant"
         self.stats  = {
             "total_calls":          0,
             "total_tokens_before":  0,
