@@ -361,7 +361,7 @@ class CCMAgent:
         try:
             response = self._call_llm(messages, use_tools=True)
 
-            max_tool_rounds = 10
+            max_tool_rounds = 2
             tool_round      = 0
 
             while (
