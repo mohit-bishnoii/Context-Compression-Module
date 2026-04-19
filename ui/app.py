@@ -126,11 +126,11 @@ def chat(
     # ── One-time reset on first turn ─────────────────────────────
     # If session_active is False, this is the first message.
     # Reset all storage once before the agents process anything.
-    if not session_active:
-        print("[App] First turn detected — resetting all storage...")
-        reset_all_storage()
-        baseline_agent.reset()
-        ccm_agent.reset()
+    # if not session_active:
+    #     print("[App] First turn detected — resetting all storage...")
+    #     reset_all_storage()
+    #     baseline_agent.reset()
+    #     ccm_agent.reset()
 
     baseline_history = baseline_history + [
         {"role": "user", "content": user_message},

@@ -20,21 +20,18 @@ from travel_agent.prompts import TRAVEL_AGENT_SYSTEM_PROMPT
 
 load_dotenv()
 
-# Tool definitions — budget_per_night is optional and uses oneOf to allow null
 TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": (
-                "Search for flights, trains, and general travel information"
-            ),
+            "description": "Search for flights, trains, and general travel information",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query"
+                        "description": "Search query string"
                     }
                 },
                 "required": ["query"]
@@ -45,9 +42,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "places_search",
-            "description": (
-                "Search for hotels, restaurants, or attractions"
-            ),
+            "description": "Search for hotels, restaurants, or attractions in a city",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -57,12 +52,12 @@ TOOL_DEFINITIONS = [
                     },
                     "category": {
                         "type": "string",
-                        "description": "hotels, restaurants, or attractions",
+                        "description": "Type of place to search for",
                         "enum": ["hotels", "restaurants", "attractions"]
                     },
                     "budget_per_night": {
                         "type": "number",
-                        "description": "Max price per night for hotels (optional, omit if not known)"
+                        "description": "Max price per night in USD. Only include when user stated a specific number."
                     }
                 },
                 "required": ["location", "category"]
@@ -73,9 +68,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "weather_fetch",
-            "description": (
-                "Get weather and packing recommendations for a city"
-            ),
+            "description": "Get weather forecast and packing advice for a city",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -85,7 +78,7 @@ TOOL_DEFINITIONS = [
                     },
                     "travel_dates": {
                         "type": "string",
-                        "description": "Travel dates or month"
+                        "description": "Travel month or date range"
                     }
                 },
                 "required": ["city"]
@@ -96,30 +89,25 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "budget_tracker",
-            "description": "Track travel expenses and check budget",
+            "description": "Track travel expenses and remaining budget",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": [
-                            "set_budget",
-                            "add_expense",
-                            "get_status",
-                            "reset"
-                        ]
+                        "enum": ["set_budget", "add_expense", "get_status", "reset"]
                     },
                     "amount": {
                         "type": "number",
-                        "description": "Expense amount"
+                        "description": "Expense amount in USD"
                     },
                     "category": {
                         "type": "string",
-                        "description": "Expense category"
+                        "description": "Expense category e.g. flights, hotels"
                     },
                     "total_budget": {
                         "type": "number",
-                        "description": "Total budget for set_budget action"
+                        "description": "Total trip budget for set_budget action"
                     }
                 },
                 "required": ["action"]
@@ -137,13 +125,21 @@ def count_tokens(text: str) -> int:
         return len(text) // 4
 
 
+def _is_tool_call_error(error_str: str) -> bool:
+    """Detect the malformed function call error from Groq."""
+    return (
+        "tool_use_failed" in error_str
+        or "failed_generation" in error_str
+        or "Failed to call a function" in error_str
+    )
+
+
 def _format_result_for_llm(tool_name: str, raw_result: dict) -> str:
     try:
         if tool_name == "places_search":
             results = raw_result.get("results", [])
             if not results:
-                msg = raw_result.get("message", "No results found.")
-                return f"places_search: {msg}"
+                return f"places_search: {raw_result.get('message', 'No results found.')}"
             lines = []
             for r in results[:5]:
                 name    = r.get("name") or "Unknown"
@@ -152,84 +148,67 @@ def _format_result_for_llm(tool_name: str, raw_result: dict) -> str:
                 rating  = r.get("rating") or ""
                 warning = r.get("allergy_warning") or ""
                 line    = f"- {name}"
-                if addr:
-                    line += f", {addr}"
-                if price:
-                    line += f" (${price}/night)"
-                if rating:
-                    line += f" ★{rating}"
-                if warning:
-                    line += f" | ⚠️ {warning}"
+                if addr:   line += f", {addr}"
+                if price:  line += f" (${price}/night)"
+                if rating: line += f" star:{rating}"
+                if warning: line += f" | WARNING: {warning}"
                 lines.append(line)
-            source = raw_result.get("data_source", "")
-            return f"Places results ({source}):\n" + "\n".join(lines)
+            return f"Places ({raw_result.get('data_source','')}):\n" + "\n".join(lines)
 
         elif tool_name == "web_search":
             results = raw_result.get("results", [])
             if not results:
-                msg = raw_result.get("message", "No results found.")
-                return f"web_search: {msg}"
+                return f"web_search: {raw_result.get('message', 'No results.')}"
             lines = []
             for r in results[:5]:
                 title   = r.get("title") or r.get("airline") or ""
                 snippet = r.get("snippet") or ""
                 price   = r.get("price") or ""
                 line = f"- {title}"
-                if price:
-                    line += f": {price}"
-                if snippet:
-                    line += f" — {snippet}"
+                if price:   line += f": {price}"
+                if snippet: line += f" - {snippet}"
                 lines.append(line)
-            stype  = raw_result.get("search_type", "")
-            return f"Search results [{stype}]:\n" + "\n".join(lines)
+            return f"Search [{raw_result.get('search_type','')}]:\n" + "\n".join(lines)
 
         elif tool_name == "weather_fetch":
             city  = raw_result.get("city", "")
             cond  = raw_result.get("current_conditions", {})
-            temp  = cond.get("temperature_f", "?")
-            desc  = cond.get("description", "")
-            note  = raw_result.get("seasonal_note", "")
+            lines = [f"Weather {city}: {cond.get('temperature_f','?')}F, {cond.get('description','')}"]
+            note = raw_result.get("seasonal_note", "")
+            if note: lines.append(f"Note: {note}")
             packing = raw_result.get("packing_recommendations", [])
-            lines = [f"Weather in {city}: {temp}°F, {desc}"]
-            if note:
-                lines.append(f"Seasonal note: {note}")
-            if packing:
-                lines.append(f"Pack: {', '.join(packing[:6])}")
+            if packing: lines.append(f"Pack: {', '.join(packing[:6])}")
             return "\n".join(lines)
 
         elif tool_name == "budget_tracker":
-            status    = raw_result.get("status", "")
             total     = raw_result.get("total_budget", "")
             spent     = raw_result.get("total_spent", raw_result.get("amount_spent", ""))
             remaining = raw_result.get("remaining", "")
             warning   = raw_result.get("warning", "")
-            lines = [f"Budget: {status}"]
+            lines = [f"Budget status: {raw_result.get('status','')}"]
             if total != "":
-                lines.append(f"Total: ${total}  |  Spent: ${spent}  |  Remaining: ${remaining}")
-            if warning:
-                lines.append(warning)
+                lines.append(f"Total: ${total} | Spent: ${spent} | Remaining: ${remaining}")
+            if warning: lines.append(warning)
             return "\n".join(lines)
 
         else:
             raw_str = json.dumps(raw_result, indent=2)
-            return raw_str[:600] + ("…" if len(raw_str) > 600 else "")
+            return raw_str[:500] + ("..." if len(raw_str) > 500 else "")
 
     except Exception:
         return str(raw_result)[:400]
 
 
 def execute_tool(tool_name: str, tool_args: dict) -> tuple:
-    """Execute a tool, coercing types to avoid validation errors."""
+    """Execute a tool with safe type coercion."""
     try:
         if tool_name == "web_search":
-            query = tool_args.get("query", "")
-            result = web_search(query)
-            return result, query
+            query = str(tool_args.get("query", ""))
+            return web_search(query), query
 
         elif tool_name == "places_search":
-            location = tool_args.get("location", "")
-            category = tool_args.get("category", "hotels")
-            # Safely coerce budget_per_night — LLM sometimes sends null/string
+            location = str(tool_args.get("location", ""))
+            category = str(tool_args.get("category", "hotels"))
             raw_budget = tool_args.get("budget_per_night")
             budget = None
             if raw_budget is not None:
@@ -238,37 +217,24 @@ def execute_tool(tool_name: str, tool_args: dict) -> tuple:
                 except (TypeError, ValueError):
                     budget = None
             result = places_search(location, category, budget)
-            query = f"{category} in {location}"
-            return result, query
+            return result, f"{category} in {location}"
 
         elif tool_name == "weather_fetch":
-            city = tool_args.get("city", "")
-            dates = tool_args.get("travel_dates", "upcoming trip")
-            result = weather_fetch(city, dates)
-            query = f"weather in {city}"
-            return result, query
+            city  = str(tool_args.get("city", ""))
+            dates = str(tool_args.get("travel_dates", "upcoming trip"))
+            return weather_fetch(city, dates), f"weather in {city}"
 
         elif tool_name == "budget_tracker":
-            # Coerce numeric fields
-            raw_amount = tool_args.get("amount", 0)
-            raw_total  = tool_args.get("total_budget", 0)
-            try:
-                amount = float(raw_amount) if raw_amount else 0
-            except (TypeError, ValueError):
-                amount = 0
-            try:
-                total_budget = float(raw_total) if raw_total else 0
-            except (TypeError, ValueError):
-                total_budget = 0
-
+            def _to_float(v):
+                try: return float(v) if v else 0
+                except (TypeError, ValueError): return 0
             result = budget_tracker(
                 action=tool_args.get("action"),
-                amount=amount,
-                category=tool_args.get("category", "general"),
-                total_budget=total_budget,
+                amount=_to_float(tool_args.get("amount")),
+                category=str(tool_args.get("category", "general")),
+                total_budget=_to_float(tool_args.get("total_budget")),
             )
-            query = f"budget {tool_args.get('action', '')}"
-            return result, query
+            return result, f"budget {tool_args.get('action','')}"
 
         else:
             return {"error": f"Unknown tool: {tool_name}"}, tool_name
@@ -277,121 +243,69 @@ def execute_tool(tool_name: str, tool_args: dict) -> tuple:
         return {"error": str(e)}, tool_name
 
 
-def _looks_like_food_query(user_message: str) -> bool:
-    msg = user_message.lower()
-    keywords = [
-        "restaurant", "restaurants", "dinner", "lunch", "breakfast",
-        "food", "eat", "dining", "spots", "cafe",
-    ]
-    return any(word in msg for word in keywords)
+def _looks_like_food_query(msg: str) -> bool:
+    kw = ["restaurant", "restaurants", "dinner", "lunch", "breakfast",
+          "food", "eat", "dining", "spots", "cafe"]
+    return any(w in msg.lower() for w in kw)
 
 
-def _response_mentions_allergy(response_text: str) -> bool:
-    text = response_text.lower()
-    markers = [
-        "shellfish", "allerg", "seafood", "warning", "avoid",
-        "safe for", "not suitable", "cannot eat",
-    ]
-    return any(marker in text for marker in markers)
+def _response_mentions_allergy(text: str) -> bool:
+    markers = ["shellfish", "allerg", "seafood", "warning", "avoid",
+               "safe for", "not suitable", "cannot eat"]
+    return any(m in text.lower() for m in markers)
 
 
-def _classify_restaurant_safety(item: dict) -> str:
-    warning = str(item.get("allergy_warning", "")).lower()
-    cuisine = str(item.get("cuisine", "")).lower()
-
-    safe_markers = [
-        "safe for shellfish allergy", "shellfish-free",
-        "no shellfish", "accommodate shellfish allergy",
-        "allergy accommodations available",
-    ]
-    caution_markers = [
-        "check with staff", "ask vendor", "ask staff",
-        "advance notice",
-    ]
-
-    if any(marker in warning for marker in safe_markers):
-        return "safe"
-    if (
-        "seafood" in cuisine and "safe" not in warning
-    ) or "not suitable for shellfish allergy" in warning or "primary ingredient" in warning:
-        return "unsafe"
-    if any(marker in warning for marker in caution_markers):
-        return "caution"
-    if "shellfish" in warning:
-        return "unsafe"
-    return "unknown"
-
-
-def _enforce_critical_constraints(
-    response_text: str,
-    user_message: str,
-    tool_calls_this_turn: list,
-    memory_state: dict,
-) -> str:
+def _enforce_critical_constraints(response_text, user_message, tool_calls_this_turn, memory_state):
     critical_facts = (
         memory_state.get("working_memory_raw", {})
-        .get("facts", {})
-        .get("critical", [])
+        .get("facts", {}).get("critical", [])
     )
-    critical_values = [
-        str(fact.get("value", "")).lower()
-        for fact in critical_facts
-    ]
+    critical_values = [str(f.get("value", "")).lower() for f in critical_facts]
+    has_shellfish = any("shellfish" in v or "allerg" in v for v in critical_values)
 
-    has_shellfish_constraint = any(
-        "shellfish" in value or "allerg" in value
-        for value in critical_values
-    )
-    if not has_shellfish_constraint or not _looks_like_food_query(user_message):
+    if not has_shellfish or not _looks_like_food_query(user_message):
         return response_text
-
     if _response_mentions_allergy(response_text):
         return response_text
 
-    safe_names    = []
-    caution_names = []
-    unsafe_names  = []
-
+    safe, caution, unsafe = [], [], []
     for call in tool_calls_this_turn:
         if call.get("tool") != "places_search":
             continue
-        raw_result = call.get("raw_result", {})
-        if not isinstance(raw_result, dict):
-            continue
-        for item in raw_result.get("results", []):
-            if not isinstance(item, dict):
-                continue
+        for item in call.get("raw_result", {}).get("results", []):
+            if not isinstance(item, dict): continue
             name = item.get("name")
-            if not name:
-                continue
-            safety = _classify_restaurant_safety(item)
-            if safety == "safe":
-                safe_names.append(name)
-            elif safety == "caution":
-                caution_names.append(name)
-            elif safety == "unsafe":
-                unsafe_names.append(name)
+            if not name: continue
+            w = str(item.get("allergy_warning", "")).lower()
+            c = str(item.get("cuisine", "")).lower()
+            if any(m in w for m in ["safe for shellfish", "shellfish-free", "no shellfish"]):
+                safe.append(name)
+            elif "shellfish" in w or ("seafood" in c and "safe" not in w):
+                unsafe.append(name)
+            elif any(m in w for m in ["check with staff", "ask vendor"]):
+                caution.append(name)
 
-    safe_names    = list(dict.fromkeys(safe_names))
-    caution_names = list(dict.fromkeys(caution_names))
-    unsafe_names  = list(dict.fromkeys(unsafe_names))
+    parts = ["WARNING: Due to your severe shellfish allergy, be careful at seafood-heavy spots."]
+    if unsafe:  parts.append(f"Avoid: {', '.join(list(dict.fromkeys(unsafe))[:2])}.")
+    if safe:    parts.append(f"Safer options: {', '.join(list(dict.fromkeys(safe))[:2])}.")
+    elif caution: parts.append(f"Ask staff about allergens at: {', '.join(list(dict.fromkeys(caution))[:2])}.")
 
-    warning_lines = [
-        "⚠️ Because of your severe shellfish allergy, I would avoid seafood-heavy spots and double-check ingredients with staff."
-    ]
-    if unsafe_names:
-        warning_lines.append("Avoid: " + ", ".join(unsafe_names[:2]) + ".")
-    if safe_names:
-        warning_lines.append("Safer picks: " + ", ".join(safe_names[:2]) + ".")
-    elif caution_names:
-        warning_lines.append(
-            "More allergy-aware options: " + ", ".join(caution_names[:2]) + "."
-        )
+    prefix = " ".join(parts)
+    return f"{prefix}\n\n{response_text}" if response_text.strip() else prefix
 
-    warning_prefix = " ".join(warning_lines)
-    if response_text.strip():
-        return f"{warning_prefix}\n\n{response_text}"
-    return warning_prefix
+
+def _build_clean_context(compressed_context: str, user_message: str) -> str:
+    """
+    Build a clean user message that won't confuse the LLM's tool-call generation.
+    The key fix: avoid putting angle-bracket-heavy content right before tool calls.
+    We wrap the context in a clearly labeled block.
+    """
+    return (
+        "MEMORY CONTEXT (use this to inform your response):\n"
+        + compressed_context.strip()
+        + "\n\nUSER REQUEST: "
+        + user_message
+    )
 
 
 class CCMAgent:
@@ -401,16 +315,30 @@ class CCMAgent:
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self.model  = "llama-3.3-70b-versatile"
         self.ccm    = ContextCompressionModule(use_reranking=use_reranking)
-        self.turn_count  = 0
-        self.token_counts = []
+        self.turn_count     = 0
+        self.token_counts   = []
         self.tool_calls_log = []
 
     def reset(self):
         self.ccm.reset()
         reset_budget()
-        self.turn_count   = 0
-        self.token_counts = []
+        self.turn_count     = 0
+        self.token_counts   = []
         self.tool_calls_log = []
+
+    def _call_llm(self, messages: list, use_tools: bool = True):
+        kwargs = dict(
+            model=self.model,
+            messages=messages,
+            max_tokens=1024,
+            temperature=0.0,
+        )
+        if use_tools:
+            kwargs["tools"] = TOOL_DEFINITIONS
+            kwargs["tool_choice"] = "auto"
+            # CHANGE THIS TO TRUE
+            kwargs["parallel_tool_calls"] = True 
+        return self.client.chat.completions.create(**kwargs)
 
     def chat(self, user_message: str) -> dict:
         self.turn_count += 1
@@ -419,55 +347,22 @@ class CCMAgent:
         # Get compressed context from CCM
         compressed_context = self.ccm.process_user_message(user_message)
 
-        # Build the system prompt — explicitly tell the agent to USE tools
-        system_prompt = TRAVEL_AGENT_SYSTEM_PROMPT + """
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-IMPORTANT TOOL USAGE RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-You MUST call tools to answer the user's question. Do NOT just ask
-"what would you like to do next?" without first using a tool.
-
-- User asks about flights → call web_search
-- User asks about hotels → call places_search with category="hotels"
-- User asks about restaurants → call places_search with category="restaurants"
-- User asks about attractions → call places_search with category="attractions"
-- User asks about weather → call weather_fetch
-- User mentions a budget → call budget_tracker with action="set_budget"
-
-IMPORTANT: For places_search, NEVER pass budget_per_night as null or a string.
-Only include budget_per_night if you have an explicit numeric value.
-If no budget is specified for hotels, omit budget_per_night entirely.
-"""
+        # Build clean user content — avoid format that confuses tool-call generation
+        user_content = _build_clean_context(compressed_context, user_message)
 
         messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"{compressed_context}\n\n"
-                    f"[CURRENT MESSAGE]\n{user_message}"
-                )
-            }
+            {"role": "system", "content": TRAVEL_AGENT_SYSTEM_PROMPT},
+            {"role": "user",   "content": user_content}
         ]
 
-        context_tokens = count_tokens(system_prompt + compressed_context)
+        context_tokens = count_tokens(TRAVEL_AGENT_SYSTEM_PROMPT + compressed_context)
         response_text  = ""
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-                max_tokens=1024,
-                temperature=0.0,
-                parallel_tool_calls=False,
-            )
+            response = self._call_llm(messages, use_tools=True)
 
-            max_tool_rounds = 5
-            tool_round = 0
+            max_tool_rounds = 10
+            tool_round      = 0
 
             while (
                 response.choices[0].finish_reason == "tool_calls"
@@ -499,8 +394,7 @@ If no budget is specified for hotels, omit budget_per_night entirely.
                     except Exception:
                         tool_args = {}
 
-                    print(f"  [CCMAgent] Tool call: {tool_name}({tool_args})")
-
+                    print(f"  [CCMAgent] Tool: {tool_name}({tool_args})")
                     raw_result, query_used = execute_tool(tool_name, tool_args)
 
                     compressed_result = self.ccm.process_tool_result(
@@ -522,35 +416,52 @@ If no budget is specified for hotels, omit budget_per_night entirely.
                         "query": query_used,
                     })
 
-                    llm_tool_content = _format_result_for_llm(tool_name, raw_result)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": llm_tool_content,
+                        "content": _format_result_for_llm(tool_name, raw_result),
                     })
 
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=TOOL_DEFINITIONS,
-                    tool_choice="auto",
-                    max_tokens=1024,
-                    temperature=0.0,
-                    parallel_tool_calls=False,
-                )
+                response = self._call_llm(messages, use_tools=True)
 
             response_text = response.choices[0].message.content or ""
-            response_text = _enforce_critical_constraints(
-                response_text=response_text,
-                user_message=user_message,
-                tool_calls_this_turn=tool_calls_this_turn,
-                memory_state=self.ccm.get_memory_state(),
-            )
 
         except Exception as e:
-            response_text = f"I encountered an error: {str(e)}"
+            error_str = str(e)
             print(f"[CCMAgent] Error: {e}")
 
+            # ── Retry without tools if malformed tool-call error ──
+            if _is_tool_call_error(error_str):
+                print("[CCMAgent] Retrying without tools (tool_use_failed)...")
+                try:
+                    retry_messages = [
+                        {"role": "system", "content": TRAVEL_AGENT_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": (
+                                user_content
+                                + "\n\nNote: Tool calls are unavailable right now. "
+                                "Answer based on your knowledge and the memory context above."
+                            )
+                        }
+                    ]
+                    retry_response = self._call_llm(retry_messages, use_tools=False)
+                    response_text = retry_response.choices[0].message.content or ""
+                    print("[CCMAgent] Retry succeeded.")
+                except Exception as retry_err:
+                    response_text = f"I encountered an error processing your request: {retry_err}"
+            else:
+                response_text = f"I encountered an error: {error_str}"
+
+        # Apply allergy safety guardrail
+        response_text = _enforce_critical_constraints(
+            response_text=response_text,
+            user_message=user_message,
+            tool_calls_this_turn=tool_calls_this_turn,
+            memory_state=self.ccm.get_memory_state(),
+        )
+
+        # Update CCM memory
         self.ccm.process_agent_response(
             user_message=user_message,
             agent_response=response_text,
