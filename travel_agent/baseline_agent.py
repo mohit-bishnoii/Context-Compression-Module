@@ -17,6 +17,7 @@
 
 import os
 import json
+import time
 import tiktoken
 from groq import Groq
 from dotenv import load_dotenv
@@ -181,16 +182,20 @@ class BaselineAgent:
 
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "llama-3.3-70b-versatile"
+        self.model = "llama-3.1-8b-instant"
         self.conversation_history = []
         self.token_counts_per_turn = []
         self.total_tool_calls = 0
+        self.latency_per_turn: list[float] = []
+        self._llm_call_count = 0
 
     def reset(self):
         """Reset for new conversation."""
         self.conversation_history = []
         self.token_counts_per_turn = []
         self.total_tool_calls = 0
+        self.latency_per_turn = []
+        self._llm_call_count = 0
         reset_budget()
         print("[Baseline] Reset complete")
 
@@ -219,6 +224,8 @@ class BaselineAgent:
             "content": user_message
         })
 
+        _turn_start = time.perf_counter()
+
         # Build messages — FULL HISTORY every turn
         # This grows unboundedly — the core problem
         messages = [
@@ -230,6 +237,7 @@ class BaselineAgent:
         tool_calls_this_turn = []
 
         try:
+            _t0 = time.perf_counter()
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -239,6 +247,7 @@ class BaselineAgent:
                 temperature=0.0,
                 parallel_tool_calls=False
             )
+            self._llm_call_count += 1
 
             # Handle tool calls
             max_rounds = 5
@@ -314,6 +323,7 @@ class BaselineAgent:
                     }
                 ] + self.conversation_history
 
+                _t0 = time.perf_counter()
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
@@ -323,6 +333,7 @@ class BaselineAgent:
                     temperature=0.0,
                     parallel_tool_calls=False
                 )
+                self._llm_call_count += 1
 
             response_text = (
                 response.choices[0].message.content or ""
@@ -350,6 +361,7 @@ class BaselineAgent:
         # Count tokens AFTER (includes response)
         tokens_after = self._count_context_tokens()
         self.token_counts_per_turn.append(tokens_after)
+        self.latency_per_turn.append(time.perf_counter() - _turn_start)
 
         return {
             "response": response_text,
@@ -360,6 +372,10 @@ class BaselineAgent:
         }
 
     def get_metrics(self) -> dict:
+        avg_lat = (
+            sum(self.latency_per_turn) / len(self.latency_per_turn)
+            if self.latency_per_turn else 0.0
+        )
         return {
             "agent_type": "baseline",
             "total_turns": len(self.token_counts_per_turn),
@@ -373,5 +389,10 @@ class BaselineAgent:
                 len(self.token_counts_per_turn)
                 if self.token_counts_per_turn else 0
             ),
-            "total_tool_calls": self.total_tool_calls
+            "total_tool_calls": self.total_tool_calls,
+            # Latency
+            "latency_per_turn": self.latency_per_turn,
+            "avg_latency_per_turn_s": round(avg_lat, 3),
+            "total_latency_s": round(sum(self.latency_per_turn), 3),
+            "total_llm_calls": self._llm_call_count,
         }

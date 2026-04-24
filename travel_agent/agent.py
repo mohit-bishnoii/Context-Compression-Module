@@ -19,6 +19,7 @@
 
 import os
 import json
+import time
 import tiktoken
 from groq import Groq
 from dotenv import load_dotenv
@@ -457,7 +458,7 @@ class CCMAgent:
 
     def __init__(self, use_reranking: bool = True):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = "llama-3.3-70b-versatile"
+        self.model = "llama-3.1-8b-instant"
 
         # The CCM handles all memory
         self.ccm = ContextCompressionModule(
@@ -468,6 +469,8 @@ class CCMAgent:
         self.turn_count = 0
         self.token_counts = []
         self.tool_calls_log = []
+        self.latency_per_turn: list[float] = []   # wall-clock seconds per turn
+        self._llm_call_count = 0                  # total LLM round-trips
 
     def reset(self):
         """Reset for new conversation."""
@@ -476,6 +479,8 @@ class CCMAgent:
         self.turn_count = 0
         self.token_counts = []
         self.tool_calls_log = []
+        self.latency_per_turn = []
+        self._llm_call_count = 0
 
     def chat(self, user_message: str) -> dict:
         """
@@ -494,6 +499,7 @@ class CCMAgent:
         """
         self.turn_count += 1
         tool_calls_this_turn = []
+        _turn_start = time.perf_counter()
 
         # ── Step 1: Get compressed context from CCM ─────────────
         compressed_context = self.ccm.process_user_message(
@@ -530,6 +536,7 @@ class CCMAgent:
         response_text = ""
 
         try:
+            _t0 = time.perf_counter()
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -539,6 +546,7 @@ class CCMAgent:
                 temperature=0.0,
                 parallel_tool_calls=False
             )
+            self._llm_call_count += 1
 
             # ── Step 4: Handle tool calls ────────────────────────
             # Agent may call tools to get information
@@ -634,6 +642,7 @@ class CCMAgent:
                     })
 
                 # Call LLM again with compressed tool results
+                _t0 = time.perf_counter()
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
@@ -643,6 +652,7 @@ class CCMAgent:
                     temperature=0.0,
                     parallel_tool_calls=False
                 )
+                self._llm_call_count += 1
 
             # ── Step 5: Get final response ───────────────────────
             response_text = (
@@ -668,6 +678,7 @@ class CCMAgent:
 
         # ── Step 7: Record metrics ───────────────────────────────
         self.token_counts.append(context_tokens)
+        self.latency_per_turn.append(time.perf_counter() - _turn_start)
 
         return {
             "response": response_text,
@@ -684,6 +695,10 @@ class CCMAgent:
         Used by evaluation script for comparison.
         """
         memory_state = self.ccm.get_memory_state()
+        avg_lat = (
+            sum(self.latency_per_turn) / len(self.latency_per_turn)
+            if self.latency_per_turn else 0.0
+        )
         return {
             "agent_type": "ccm",
             "total_turns": self.turn_count,
@@ -695,5 +710,10 @@ class CCMAgent:
             ),
             "total_tool_calls": len(self.tool_calls_log),
             "compression_stats": memory_state["compression_stats"],
-            "token_metrics": memory_state["token_metrics"]
+            "token_metrics": memory_state["token_metrics"],
+            # Latency
+            "latency_per_turn": self.latency_per_turn,
+            "avg_latency_per_turn_s": round(avg_lat, 3),
+            "total_latency_s": round(sum(self.latency_per_turn), 3),
+            "total_llm_calls": self._llm_call_count,
         }

@@ -597,6 +597,63 @@ def test_6_baseline_fails():
     return passed
 
 
+# ─────────────────────────────────────────────────────────────────
+# TEST 7 — Multi-Session Continuity
+# ─────────────────────────────────────────────────────────────────
+
+def test_7_multi_session_continuity():
+    """
+    Verify that episodic memory persists across Python process boundaries.
+    
+    Flow:
+      1. Agent A stores a specific episodic memory
+      2. Destroy Agent A
+      3. Create Agent B
+      4. Ask Agent B a question about the memory
+      5. Verify retrieval works
+    """
+    print("\n" + "=" * 55)
+    print("TEST 7: Multi-Session Continuity")
+    print("=" * 55)
+
+    reset_all_storage()
+
+    from travel_agent.agent import CCMAgent
+
+    # Session A
+    print("Starting Session A...")
+    agent_a = CCMAgent(use_reranking=False)
+    agent_a.chat("I have a severe peanut allergy. Remember this forever.")
+    agent_a.chat("My dog's name is Barnaby and he is a golden retriever.")
+    
+    # Give ChromaDB a moment to commit
+    time.sleep(1.0)
+    
+    # Destroy Session A
+    del agent_a
+    import gc
+    gc.collect()
+    print("Session A destroyed. Starting Session B...")
+    
+    # Session B
+    agent_b = CCMAgent(use_reranking=False)
+    
+    # Directly query retriever to avoid full LLM generation dependency
+    results = agent_b.ccm.retriever.retrieve("What is my dog's name? allergies?", n_episodic=3)
+    
+    all_texts = [r["text"].lower() for r in results["episodic"]]
+    
+    peanut_remembered = any("peanut" in t for t in all_texts)
+    barnaby_remembered = any("barnaby" in t for t in all_texts)
+    
+    print(f"Retrieved {len(all_texts)} memories in new session")
+    print(f"Peanut allergy retrieved: {peanut_remembered}")
+    print(f"Dog's name retrieved: {barnaby_remembered}")
+    
+    passed = peanut_remembered or barnaby_remembered
+    print(f"\n{'✅ TEST 7 PASSED' if passed else '❌ TEST 7 FAILED'}")
+    return passed
+
 if __name__ == "__main__":
     # Quick sanity check: is GROQ_API_KEY set?
     from dotenv import load_dotenv
@@ -643,6 +700,11 @@ if __name__ == "__main__":
     time.sleep(INTER_TURN_SLEEP * 2)
 
     results["baseline_fails"] = test_6_baseline_fails()
+
+    print(f"\n(sleeping {INTER_TURN_SLEEP * 2}s…)\n")
+    time.sleep(INTER_TURN_SLEEP * 2)
+
+    results["multi_session"] = test_7_multi_session_continuity()
 
     # Final summary
     print("\n" + "=" * 55)

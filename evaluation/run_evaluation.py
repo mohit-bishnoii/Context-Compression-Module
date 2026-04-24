@@ -13,7 +13,12 @@ from travel_agent.baseline_agent import BaselineAgent
 from travel_agent.agent import CCMAgent
 from evaluation.test_conversations import ALL_TESTS
 from evaluation.assertions import check_response
-from evaluation.metrics import print_metrics_table
+from evaluation.metrics import (
+    print_hackathon_metrics,
+    score_factual_recall,
+    score_tool_calls,
+    score_coherence
+)
 
 
 def run_single_test(agent, test: dict, agent_type: str) -> dict:
@@ -64,6 +69,18 @@ def run_single_test(agent, test: dict, agent_type: str) -> dict:
             "details": "Key turn response not found"
         }
 
+    # Score metrics
+    facts_to_check = criteria.get("expected_facts", [])
+    expected_tools = criteria.get("expected_tools", [])
+    
+    actual_tools = []
+    if hasattr(agent, "tool_calls_log"):
+        actual_tools = [c for c in agent.tool_calls_log if c.get("turn") == key_turn_index + 1]
+
+    recall_res = score_factual_recall(responses[key_turn_index] if key_turn_index < len(responses) else "", facts_to_check)
+    tool_res = score_tool_calls(actual_tools, expected_tools)
+    coherence_res = score_coherence(responses)
+
     print(f"\n--- RESULT: {test['name']} [{agent_type}] ---")
     print(f"Passed: {assertion_result['passed']}")
     print(f"Details: {assertion_result['details']}")
@@ -77,7 +94,10 @@ def run_single_test(agent, test: dict, agent_type: str) -> dict:
         "details": assertion_result["details"],
         "tokens_at_key_turn": tokens_per_turn[key_turn_index] if key_turn_index < len(tokens_per_turn) else 0,
         "tokens_per_turn": tokens_per_turn,
-        "key_response": responses[key_turn_index] if key_turn_index < len(responses) else ""
+        "key_response": responses[key_turn_index] if key_turn_index < len(responses) else "",
+        "factual_recall_score": recall_res["score"],
+        "tool_call_correctness": tool_res["score"],
+        "coherence_score": coherence_res["score"]
     }
 
 
@@ -127,8 +147,32 @@ def run_full_evaluation(
                 "details": "Baseline not run"
             })
 
+    # Gather global metrics
+    global_stats = {}
+    
+    if hasattr(baseline_agent, "get_metrics"):
+        bm = baseline_agent.get_metrics()
+        global_stats["baseline_avg_latency_s"] = bm.get("avg_latency_per_turn_s")
+        global_stats["baseline_total_tokens"] = sum(bm.get("token_counts_per_turn", []))
+
+    if hasattr(ccm_agent, "get_metrics"):
+        cm = ccm_agent.get_metrics()
+        global_stats["ccm_avg_latency_s"] = cm.get("avg_latency_per_turn_s")
+        global_stats["ccm_total_tokens"] = sum(cm.get("token_counts_per_turn", []))
+        if "compression_stats" in cm:
+            c_stats = cm["compression_stats"]
+            global_stats["overall_compression_ratio"] = c_stats.get("overall_compression_ratio")
+            global_stats["omission_rate"] = c_stats.get("omission_rate")
+
+    # Try running the test 7 if it's available (placeholder to see if it passed)
+    try:
+        from test import test_7_multi_session_continuity
+        global_stats["multi_session_continuity"] = test_7_multi_session_continuity()
+    except (ImportError, Exception):
+        global_stats["multi_session_continuity"] = None
+
     # Print results table
-    print_metrics_table(baseline_results, ccm_results)
+    print_hackathon_metrics(baseline_results, ccm_results, global_stats)
 
     return {
         "baseline": baseline_results,

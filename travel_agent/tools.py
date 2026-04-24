@@ -321,25 +321,29 @@ def web_search(query: str) -> dict:
 
 
 def _search_flights(query: str) -> dict:
-    """Search flights using SerpApi Google Flights."""
+    """Search flights using SerpApi regular search (not Google Flights engine)."""
     api_key = os.getenv("SERP_API_KEY")
-    
+
     if not api_key:
         return _fallback_flights(query)
-    
+
     try:
         client = SerpClient(api_key=api_key)
-        results = client.search(engine="google_flights", q=query)
-        
+        results = client.search(q=query)
+
         flights = []
-        for flight in results.get("best_flights", [])[:5]:
+        for r in results.get("organic_results", [])[:5]:
+            title = r.get("title", "")
+            snippet = r.get("snippet", "")
             flights.append({
-                "airline": flight.get("flights", [{}])[0].get("airline", "Unknown"),
-                "price": flight.get("price", "N/A"),
-                "duration": flight.get("total_duration", "N/A"),
-                "type": "Real-time Flight Data"
+                "airline": title,
+                "price": snippet,
+                "duration": "N/A",
+                "type": "Search Results"
             })
-        return {"results": flights, "data_source": "Google Flights via SerpApi", "search_type": "flights"}
+        if flights:
+            return {"results": flights, "data_source": "SerpApi", "search_type": "flights"}
+        return _fallback_flights(query)
     except Exception as e:
         print(f"SerpApi flight search failed: {e}")
         return _fallback_flights(query)

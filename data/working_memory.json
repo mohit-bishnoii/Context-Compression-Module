@@ -2,11 +2,26 @@
   "facts": {
     "critical": [],
     "important": [],
-    "contextual": []
+    "contextual": [
+      {
+        "key": "travel_origin",
+        "value": "from India",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 2
+      },
+      {
+        "key": "travel_destination",
+        "value": "Japan",
+        "category": "information",
+        "priority": "contextual",
+        "added_at_turn": 2
+      }
+    ]
   },
   "decisions": [],
   "cancelled": [],
-  "turn_count": 0,
+  "turn_count": 2,
   "conversation_id": "",
-  "last_updated": ""
+  "last_updated": "2026-04-19T10:19:24.668277"
 }

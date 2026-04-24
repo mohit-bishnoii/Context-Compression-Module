@@ -14,12 +14,13 @@
 #   # AFTER getting a tool result:
 #   compressed = ccm.process_tool_result(tool_name, raw_result, query)
 #   → Compresses 600-token result to ~80 tokens.
-#     Stores in SemanticMemory. Returns compressed string.
+#     Stores in SemanticMemory ONLY if query references past.
+#     Returns compressed string.
 #
 #   # AFTER agent responds:
 #   ccm.process_agent_response(user_msg, agent_response, tool_calls)
-#   → Appends to conversation history. Every 4 turns, creates
-#     an episodic summary and stores in EpisodicMemory.
+#   → Appends to conversation history. When topic is concluded,
+#     creates an episodic summary and stores in EpisodicMemory.
 #
 #   # For UI display:
 #   state = ccm.get_memory_state()
@@ -28,26 +29,28 @@
 #
 #   process_user_message(msg):
 #     1. increment turn counter
-#     2. Extractor: LLM call → extract facts → add to WorkingMemory
-#     3. StaleDetector: if override signal → LLM call →
+#     2. Extract topic from message using TopicTracker
+#     3. Extractor: LLM call → extract facts → add to WorkingMemory
+#     4. StaleDetector: if override signal → LLM call →
 #        remove keys from WorkingMemory, mark stale in both
 #        EpisodicMemory AND SemanticMemory
-#     4. Retriever: embed query → ChromaDB search → optional re-rank
-#     5. Assembler: build context packet (WorkingMemory always first)
-#     6. Return context string
+#     5. Retriever: embed query → ChromaDB search → optional re-rank
+#     6. Assemble context packet (WorkingMemory always first)
+#     7. Return context string
 #
 #   process_tool_result(tool, raw, query):
 #     1. Get critical constraints from WorkingMemory
 #     2. Compressor: LLM call → 600 tokens → ~80 tokens
-#     3. Store compressed result in SemanticMemory
+#     3. Store compressed result in SemanticMemory ONLY if
+#        query references past (not on first inquiry)
 #     4. Return compressed string (agent uses this instead of raw)
 #
 #   process_agent_response(user, response, tool_calls):
 #     1. Append user + assistant to conversation_history
-#     2. Append to turn_buffer
-#     3. If len(turn_buffer) >= 4:
-#          LLM call → episodic summary → EpisodicMemory.add()
-#          Clear buffer
+#     2. Extract topic from user message
+#     3. Detect conclusion signal
+#     4. If conclusion detected → create topic-based episodic summary
+#     5. If topic switch → create summary for old topic first
 
 import os
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
@@ -65,10 +68,15 @@ from ccm.compressor      import ToolCompressor
 from ccm.stale_detector  import StaleDetector
 from ccm.retriever       import Retriever
 from ccm.assembler       import ContextAssembler
+from ccm.topic_tracker  import (
+    extract_topic,
+    detect_explicit_conclusion,
+    detect_implicit_conclusion,
+    should_switch_topic,
+    classify_query_type,
+)
 
 load_dotenv()
-
-EPISODE_EVERY_N_TURNS = 4
 
 
 def _count_tokens(text: str) -> int:
@@ -118,7 +126,8 @@ class ContextCompressionModule:
 
         # Conversation state
         self.conversation_history  = []   # full raw history
-        self.turn_buffer           = []   # turns since last episode
+        self.topic_buffers       = {}   # topic-based turn storage: {"flights": ["turn1", "turn2"], "hotels": []}
+        self.active_topic       = "general"
         self.turn_count            = 0
         self.total_baseline_tokens = 0
         self.total_ccm_tokens      = 0
@@ -141,8 +150,22 @@ class ContextCompressionModule:
         print(f"[CCM] Turn {self.turn_count}")
         print(f"{'='*50}")
 
-        # Step 1: Extract facts
-        print("[CCM] Step 1: Extracting facts…")
+        # Step 1: Extract topic and facts
+        print("[CCM] Step 1: Extracting topic and facts…")
+        current_topic = extract_topic(user_message)
+        print(f"[CCM] Topic detected: {current_topic}")
+
+        # Track topic switch
+        if should_switch_topic(current_topic, self.active_topic):
+            print(f"[CCM] Topic switch: {self.active_topic} → {current_topic}")
+            # Create summary for old topic before switching
+            if self.active_topic in self.topic_buffers and self.topic_buffers[self.active_topic]:
+                self._create_topic_summary(self.active_topic)
+            # Clear old topic buffer
+            if self.active_topic in self.topic_buffers:
+                self.topic_buffers[self.active_topic] = []
+        self.active_topic = current_topic
+
         try:
             self.extractor.extract_and_update(user_message, self.working_memory)
         except Exception as exc:
@@ -163,16 +186,35 @@ class ContextCompressionModule:
             print(f"[CCM] StaleDetector error (non-fatal): {exc}")
 
         # Step 3: Retrieve relevant memories
-        print("[CCM] Step 3: Retrieving memories…")
+        # Only retrieve from semantic if query references past
+        query_type = classify_query_type(user_message)
+        print(f"[CCM] Step 3: Retrieving memories (query_type: {query_type})…")
+
         try:
-            retrieved = self.retriever.retrieve(
+            # Always retrieve episodic memory
+            retrieved_episodic = self.retriever.retrieve_episodic_only(
                 query=user_message,
-                n_episodic=4,
-                n_semantic=3,
+                n_results=4,
             )
         except Exception as exc:
-            print(f"[CCM] Retriever error (non-fatal): {exc}")
-            retrieved = {"episodic": [], "semantic": []}
+            print(f"[CCM] Episodic retrieval error (non-fatal): {exc}")
+            retrieved_episodic = []
+
+        # Only retrieve semantic if query references past
+        retrieved_semantic = []
+        if query_type == "past":
+            print("[CCM] Query references past - retrieving from SemanticMemory")
+            try:
+                retrieved_semantic = self.retriever.retrieve_semantic_only(
+                    query=user_message,
+                    n_results=3,
+                )
+            except Exception as exc:
+                print(f"[CCM] Semantic retrieval error (non-fatal): {exc}")
+        else:
+            print("[CCM] New inquiry - skipping SemanticMemory retrieval")
+
+        retrieved = {"episodic": retrieved_episodic, "semantic": retrieved_semantic}
 
         # Step 4: Assemble context packet
         print("[CCM] Step 4: Assembling context…")
@@ -206,6 +248,8 @@ class ContextCompressionModule:
 
         Call this immediately after executing any tool.
         Use the returned string (not the raw result) in your LLM prompt.
+
+        ALWAYS stores in semantic memory (for future retrieval).
         """
         print(f"[CCM] Compressing tool result: {tool_name}")
 
@@ -221,6 +265,8 @@ class ContextCompressionModule:
             print(f"[CCM] Compressor error: {exc}")
             compressed = str(raw_result)[:300]
 
+        # ALWAYS store tool result for future retrieval
+        print(f"[CCM] Storing result in SemanticMemory")
         try:
             self.semantic_memory.add(
                 compressed_result=compressed,
@@ -243,32 +289,50 @@ class ContextCompressionModule:
         Update memory after the agent responds.
 
         Call this AFTER every agent response.
+        Uses topic-based episodic summarization.
         """
         self.conversation_history.append({"role": "user",      "content": user_message})
         self.conversation_history.append({"role": "assistant",  "content": agent_response})
 
-        self.turn_buffer.append(
-            f"User: {user_message}\nAssistant: {agent_response}"
-        )
+        # Add to topic buffer
+        if self.active_topic not in self.topic_buffers:
+            self.topic_buffers[self.active_topic] = []
 
-        if len(self.turn_buffer) >= EPISODE_EVERY_N_TURNS:
-            self._create_episode_summary()
-            self.turn_buffer = []
+        turn_text = f"User: {user_message}\nAssistant: {agent_response}"
+        self.topic_buffers[self.active_topic].append(turn_text)
+
+        # Check for conclusion signal
+        has_explicit_conclusion = detect_explicit_conclusion(user_message)
+        has_implicit_conclusion = detect_implicit_conclusion(user_message)
+
+        if has_explicit_conclusion:
+            print(f"[CCM] Explicit conclusion detected for topic: {self.active_topic}")
+            self._create_topic_summary(self.active_topic)
+            # Clear topic buffer after summary
+            self.topic_buffers[self.active_topic] = []
+        elif has_implicit_conclusion:
+            print(f"[CCM] Implicit conclusion/topic switch: {self.active_topic}")
+            self._create_topic_summary(self.active_topic)
+            self.topic_buffers[self.active_topic] = []
 
     # ── Internal helpers ─────────────────────────────────────────
 
-    def _create_episode_summary(self):
-        """Summarise the current turn buffer and store in EpisodicMemory."""
-        if not self.turn_buffer:
+    def _create_topic_summary(self, topic: str):
+        """Summarise topic buffer and store in EpisodicMemory with topic metadata."""
+        if topic not in self.topic_buffers:
+            return
+
+        turns = self.topic_buffers[topic]
+        if not turns:
             return
 
         from groq import Groq
         from travel_agent.prompts import EPISODIC_SUMMARY_PROMPT
 
-        print(f"[CCM] Creating episodic summary ({len(self.turn_buffer)} turns)…")
+        print(f"[CCM] Creating topic summary for '{topic}' ({len(turns)} turns)…")
 
         wm_snapshot = self.working_memory.format_for_prompt()
-        turns_text  = "\n\n---\n\n".join(self.turn_buffer)
+        turns_text  = "\n\n---\n\n".join(turns)
 
         prompt = EPISODIC_SUMMARY_PROMPT.format(
             turns=turns_text,
@@ -278,14 +342,15 @@ class ContextCompressionModule:
         try:
             client   = Groq(api_key=os.getenv("GROQ_API_KEY"))
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-8b-instant",
                 messages=[
                     {
                         "role": "system",
                         "content": (
                             "Create a concise 2-3 sentence episodic memory summary. "
                             "Be specific: include exact names, prices, decisions. "
-                            "Do NOT duplicate facts already in working memory."
+                            "Do NOT duplicate facts already in working memory. "
+                            f"Topic: {topic}"
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -295,15 +360,16 @@ class ContextCompressionModule:
             )
             summary = response.choices[0].message.content.strip()
 
-            start_turn = self.turn_count - len(self.turn_buffer)
+            start_turn = self.turn_count - len(turns)
             self.episodic_memory.add(
                 summary_text=summary,
                 turn_range=(start_turn, self.turn_count),
+                metadata={"topic": topic},  # NEW: store topic for targeted retrieval
             )
-            print(f"[CCM] Episode stored: {summary[:80]}…")
+            print(f"[CCM] Topic summary stored: {summary[:80]}…")
 
         except Exception as exc:
-            print(f"[CCM] Episode creation failed (non-fatal): {exc}")
+            print(f"[CCM] Topic summary creation failed (non-fatal): {exc}")
 
     def _estimate_baseline_tokens(self) -> int:
         """Estimate tokens the baseline agent would use (full raw history)."""
@@ -350,7 +416,8 @@ class ContextCompressionModule:
         self.semantic_memory.reset()
         self.compressor.reset_stats()
         self.conversation_history  = []
-        self.turn_buffer           = []
+        self.topic_buffers       = {}
+        self.active_topic       = "general"
         self.turn_count            = 0
         self.total_baseline_tokens = 0
         self.total_ccm_tokens      = 0

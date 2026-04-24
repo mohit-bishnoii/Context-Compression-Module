@@ -107,7 +107,9 @@ TEST_A_SHELLFISH_ALLERGY = {
         "description": (
             "Response must mention shellfish allergy or warn "
             "about seafood when recommending Tsukiji restaurants"
-        )
+        ),
+        "expected_tools": ["places_search"],
+        "expected_facts": ["shellfish", "allerg", "budget", "3000"]
     }
 }
 
@@ -208,7 +210,9 @@ TEST_B_BUDGET_TRACKING = {
         "description": (
             "Agent must know approximately $950 remains "
             "and recommend hotels within that constraint"
-        )
+        ),
+        "expected_tools": ["places_search"],
+        "expected_facts": ["950", "budget"]
     }
 }
 
@@ -313,7 +317,9 @@ TEST_C_STALE_CONTEXT = {
             "Final summary must contain ZERO Bali references "
             "and focus entirely on Switzerland"
         ),
-        "case_sensitive": False
+        "case_sensitive": False,
+        "expected_tools": [],  # Summary turn, no tools expected
+        "expected_facts": ["switzerland", "zurich", "alps", "mountain", "hiking"]
     }
 }
 
@@ -409,7 +415,9 @@ TEST_D_CROSS_REFERENCE = {
             "means train should be Thursday morning at earliest. "
             "Must connect turn 1 constraint with turn 13 question."
         ),
-        "case_sensitive": False
+        "case_sensitive": False,
+        "expected_tools": [],
+        "expected_facts": ["meeting", "wednesday", "2pm", "paris"]
     }
 }
 
@@ -526,7 +534,9 @@ TEST_E_CONTRADICTION = {
             "Agent must flag that booking all activities "
             "contradicts the max 2 activities per day constraint"
         ),
-        "case_sensitive": False
+        "case_sensitive": False,
+        "expected_tools": [],
+        "expected_facts": ["2", "activities", "per day", "relax"]
     }
 }
 

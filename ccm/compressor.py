@@ -43,11 +43,13 @@ class ToolCompressor:
 
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model  = "llama-3.3-70b-versatile"
+        self.model  = "llama-3.1-8b-instant"
         self.stats  = {
             "total_calls":          0,
             "total_tokens_before":  0,
             "total_tokens_after":   0,
+            "total_key_fields_before": 0,
+            "total_key_fields_after":  0,
         }
 
     def compress(
@@ -80,6 +82,10 @@ class ToolCompressor:
         if user_constraints:
             constraints_text = "\n".join(f"  - {c}" for c in user_constraints)
 
+        # Basic omission tracking heuristic
+        key_fields = self._extract_key_fields(tool_result, tool_name)
+        self.stats["total_key_fields_before"] += len(key_fields)
+
         prompt = COMPRESSION_PROMPT.format(
             tool_type=tool_name,
             user_constraints=constraints_text,
@@ -111,6 +117,11 @@ class ToolCompressor:
             self.stats["total_tokens_after"] += tokens_after
             self.stats["total_calls"]        += 1
 
+            # Count preserved fields
+            comp_lower = compressed.lower()
+            preserved = sum(1 for f in key_fields if f.lower() in comp_lower)
+            self.stats["total_key_fields_after"] += preserved
+
             ratio = tokens_before / max(tokens_after, 1)
             print(
                 f"[Compressor] {tool_name}: "
@@ -120,7 +131,33 @@ class ToolCompressor:
 
         except Exception as exc:
             print(f"[Compressor] Error: {exc} — using fallback")
-            return self._fallback_compress(tool_result, tool_name)
+            comp = self._fallback_compress(tool_result, tool_name)
+            
+            comp_lower = comp.lower()
+            preserved = sum(1 for f in key_fields if f.lower() in comp_lower)
+            self.stats["total_key_fields_after"] += preserved
+            
+            return comp
+
+    def _extract_key_fields(self, result: dict, tool_name: str) -> list[str]:
+        """Extract important names/values that should survive compression."""
+        fields = []
+        if tool_name == "places_search":
+            for item in result.get("results", []):
+                if name := item.get("name"):
+                    fields.append(str(name))
+        elif tool_name == "web_search":
+            for item in result.get("results", []):
+                if title := item.get("title"):
+                    fields.append(str(title))
+        elif tool_name == "weather_fetch":
+            if cond := result.get("current_conditions", {}):
+                if temp := cond.get("temperature_f"):
+                    fields.append(str(temp))
+        elif tool_name == "budget_tracker":
+            if spent := result.get("amount_spent"):
+                fields.append(str(spent))
+        return fields
 
     def _fallback_compress(self, result: dict, tool_name: str) -> str:
         """Rule-based fallback compression when LLM call fails."""
@@ -167,6 +204,13 @@ class ToolCompressor:
         calls  = self.stats["total_calls"]
         ratio  = before / max(after, 1)
         saved  = before - after
+        
+        kb = self.stats["total_key_fields_before"]
+        ka = self.stats["total_key_fields_after"]
+        omission_rate = (1.0 - ka / kb) if kb > 0 else 0.0
+
+        from evaluation.metrics import score_omission_rate
+        
         return {
             "total_tool_calls_compressed": calls,
             "total_tokens_before":  before,
@@ -175,6 +219,9 @@ class ToolCompressor:
             "overall_compression_ratio": round(ratio, 2),
             "average_tokens_before": round(before / max(calls, 1)),
             "average_tokens_after":  round(after  / max(calls, 1)),
+            "omission_rate": omission_rate,
+            "key_fields_preserved": ka,
+            "key_fields_total": kb,
         }
 
     def reset_stats(self):
@@ -182,4 +229,6 @@ class ToolCompressor:
             "total_calls":         0,
             "total_tokens_before": 0,
             "total_tokens_after":  0,
+            "total_key_fields_before": 0,
+            "total_key_fields_after":  0,
         }

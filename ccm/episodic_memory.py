@@ -116,7 +116,7 @@ class EpisodicMemory:
         turn_range : (int, int)
             The conversation turn span this summary covers.
         metadata : dict | None
-            Optional extra metadata.
+            Optional extra metadata (e.g., {"topic": "flights"}).
 
         Returns
         -------
@@ -138,9 +138,14 @@ class EpisodicMemory:
             "type":       "episodic_summary",
         }
         if metadata:
+            # Handle topic and other custom metadata
             # Coerce any booleans to strings to be safe
             for k, v in metadata.items():
-                entry_meta[k] = ("true" if v else "false") if isinstance(v, bool) else v
+                if k == "topic":
+                    # topic can be stored as-is (string)
+                    entry_meta[k] = str(v)
+                else:
+                    entry_meta[k] = ("true" if v else "false") if isinstance(v, bool) else v
 
         vector = embed(summary_text)
 

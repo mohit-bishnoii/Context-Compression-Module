@@ -61,7 +61,7 @@ class Retriever:
 
         if use_reranking:
             self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-            self.model  = "llama-3.3-70b-versatile"
+            self.model  = "llama-3.1-8b-instant"
 
     def retrieve(
         self,
@@ -141,6 +141,56 @@ class Retriever:
         except Exception as exc:
             print(f"[Retriever] Semantic search error: {exc}")
             return []
+
+    # ── Public separate retrieval methods ─────────────────────────────────
+
+    def retrieve_episodic_only(self, query: str, n_results: int = 4) -> list:
+        """Retrieve only from episodic memory (always called)."""
+        raw_ep = self._search_episodic(query, n_results)
+        if self.use_reranking and raw_ep:
+            raw_ep = self._rerank_episodic_only(query, raw_ep)
+
+        # Apply budget to episodic
+        final_ep = []
+        total = 0
+        for r in raw_ep:
+            t = _estimate_tokens(r["text"])
+            if total + t <= MAX_RETRIEVAL_TOKENS // 2:
+                final_ep.append(r)
+                total += t
+            else:
+                break
+        return final_ep
+
+    def retrieve_semantic_only(self, query: str, n_results: int = 3) -> list:
+        """Retrieve only from semantic memory (called when query references past)."""
+        raw_sem = self._search_semantic(query, n_results)
+        if self.use_reranking and raw_sem:
+            raw_sem = self._rerank_semantic_only(query, raw_sem)
+
+        # Apply budget to semantic
+        final_sem = []
+        for r in raw_sem:
+            t = _estimate_tokens(r["text"])
+            if t <= MAX_RETRIEVAL_TOKENS:
+                final_sem.append(r)
+            else:
+                break
+        return final_sem
+
+    def _rerank_episodic_only(self, query: str, results: list) -> list:
+        """Re-rank only episodic results."""
+        if not results:
+            return []
+        # Simplified re-ranking for episodic only
+        return results[:4]
+
+    def _rerank_semantic_only(self, query: str, results: list) -> list:
+        """Re-rank only semantic results."""
+        if not results:
+            return []
+        # Simplified re-ranking for semantic only
+        return results[:3]
 
     # ── Stage 2 re-ranking ───────────────────────────────────────
 
